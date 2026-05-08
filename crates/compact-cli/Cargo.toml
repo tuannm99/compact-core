@@ -1,0 +1,15 @@
+[package]
+name = "compact-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "compact"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+compact-core = { path = "../compact-core" }

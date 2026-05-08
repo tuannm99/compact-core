@@ -1,0 +1,3 @@
+{"event_time":1710000000,"domain_id":"d1","status":"blocked","uri":"/wp-admin"}
+{"event_time":1710000001,"domain_id":"d1","status":"blocked","uri":"/wp-admin"}
+{"event_time":1710000002,"domain_id":"d2","status":"allowed","uri":"/healthz"}

@@ -1,0 +1,13 @@
+columns:
+  - name: event_time
+    type: int64
+    codec: delta_varint_i64
+  - name: domain_id
+    type: string
+    codec: dict_string
+  - name: status
+    type: string
+    codec: dict_string
+  - name: uri
+    type: string
+    codec: dict_string
