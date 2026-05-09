@@ -1,28 +1,6 @@
-# Milestones
-
-This document tracks the delivery milestones for `compact-core`. Each milestone is aligned with the roadmap and Definition of Done in [definition-of-done.md](/home/minhtuan/dev/local/nova-world/compact-core/docs/definition-of-done.md).
-
-## Phase 0 - Foundation
-
-### Deliverables
-
-- Rust workspace: `compact-core`, `compact-cli`, `compact-ffi`
-- Base directories: `bindings/go`, `schemas`, `testdata`, `benches`, `docs`
-- CLI and FFI scaffolding for future integration
-
-### Exit Criteria
-
-- Workspace layout is stable
-- Core crates build successfully
-- Basic CLI entrypoint exists
-- Basic FFI boundary exists
-- Repository structure supports upcoming milestones
+# Roadmap + Definition of Done
 
 ## v0.1 - Primitive Compression Core MVP
-
-### Goal
-
-Build the first end-to-end offline compression pipeline for JSONL data.
 
 ### Scope
 
@@ -32,7 +10,7 @@ Build the first end-to-end offline compression pipeline for JSONL data.
 - Columnar blocks
 - JSONL input
 
-### Key Features
+### Features
 
 - Varint
 - ZigZag
@@ -44,7 +22,7 @@ Build the first end-to-end offline compression pipeline for JSONL data.
 - JSONL -> compact file
 - compact -> JSONL
 
-### Exit Criteria
+### Definition of Done
 
 - `compact encode/decode` runs end to end
 - JSONL roundtrip is exact and byte-equivalent
@@ -63,17 +41,13 @@ Build the first end-to-end offline compression pipeline for JSONL data.
 
 ## v0.2 - Streaming Block Engine
 
-### Goal
-
-Support large files with bounded memory and streaming encode/decode flows.
-
 ### Scope
 
 - Bounded memory
 - Large files
 - Stream processing
 
-### Key Features
+### Features
 
 - Streaming writer
 - Streaming reader
@@ -83,7 +57,7 @@ Support large files with bounded memory and streaming encode/decode flows.
 - Row iterator
 - Column chunk metadata
 
-### Exit Criteria
+### Definition of Done
 
 - Encode/decode a 10 GB file without OOM
 - Memory stays under a configurable limit
@@ -100,16 +74,12 @@ Support large files with bounded memory and streaming encode/decode flows.
 
 ## v0.3 - Advanced Column Compression
 
-### Goal
-
-Improve compression ratio with more capable column-aware codecs.
-
 ### Scope
 
 - Columnar optimization
 - High compression ratio
 
-### Key Features
+### Features
 
 - Bit packing
 - Boolean bitmap compression
@@ -118,7 +88,7 @@ Improve compression ratio with more capable column-aware codecs.
 - Adaptive codec selection
 - Column statistics
 
-### Exit Criteria
+### Definition of Done
 
 - Adaptive codec chooser works
 - Compression ratio beats `gzip` on structured logs
@@ -135,16 +105,12 @@ Improve compression ratio with more capable column-aware codecs.
 
 ## v0.4 - Queryable Columnar Format
 
-### Goal
-
-Enable partial reads and query-oriented scans over compressed data.
-
 ### Scope
 
 - Analytics-friendly format
 - Partial reads
 
-### Key Features
+### Features
 
 - Sparse index
 - Min/max metadata
@@ -153,7 +119,7 @@ Enable partial reads and query-oriented scans over compressed data.
 - Row group pruning
 - Fast metadata scan
 
-### Exit Criteria
+### Definition of Done
 
 - Read a single column without full decode
 - Predicate pruning works
@@ -169,15 +135,11 @@ Enable partial reads and query-oriented scans over compressed data.
 
 ## v0.5 - Search Engine Compression Integration
 
-### Goal
-
-Adapt the format and codecs for search-index compression workloads.
-
 ### Scope
 
 - Search/index compression
 
-### Key Features
+### Features
 
 - Posting list compression
 - Delta docID encoding
@@ -185,7 +147,7 @@ Adapt the format and codecs for search-index compression workloads.
 - Term dictionary block
 - Skip pointers
 
-### Exit Criteria
+### Definition of Done
 
 - Posting-list compressed format works
 - docID decode is correct
@@ -200,17 +162,13 @@ Adapt the format and codecs for search-index compression workloads.
 
 ## v0.6 - Real-time Streaming Integration
 
-### Goal
-
-Support append-oriented streaming systems and checkpoint-style persistence.
-
 ### Scope
 
 - Kafka
 - Streaming
 - Checkpointing
 
-### Key Features
+### Features
 
 - Streaming snapshot compression
 - Window state compression
@@ -218,7 +176,7 @@ Support append-oriented streaming systems and checkpoint-style persistence.
 - Append-only block mode
 - Rolling file support
 
-### Exit Criteria
+### Definition of Done
 
 - Streaming append mode is stable
 - Rolling blocks supported
@@ -233,15 +191,11 @@ Support append-oriented streaming systems and checkpoint-style persistence.
 
 ## v0.7 - FFI + Multi-language SDK
 
-### Goal
-
-Expose the format safely across multiple language runtimes.
-
 ### Scope
 
 - Cross-language ecosystem
 
-### Key Features
+### Features
 
 - Stable C ABI
 - Go SDK
@@ -249,7 +203,7 @@ Expose the format safely across multiple language runtimes.
 - Node SDK
 - Version compatibility layer
 
-### Exit Criteria
+### Definition of Done
 
 - C ABI documented
 - Go binding is production-usable
@@ -265,16 +219,12 @@ Expose the format safely across multiple language runtimes.
 
 ## v0.8 - Parallel Compression Engine
 
-### Goal
-
-Scale throughput across CPU cores without sacrificing ordering or safety.
-
 ### Scope
 
 - Multi-core
 - High throughput
 
-### Key Features
+### Features
 
 - Parallel block compression
 - Parallel decode
@@ -282,7 +232,7 @@ Scale throughput across CPU cores without sacrificing ordering or safety.
 - Async I/O
 - SIMD-ready architecture
 
-### Exit Criteria
+### Definition of Done
 
 - Multi-thread scaling benchmark exists
 - Compression scales with CPU cores
@@ -297,17 +247,13 @@ Scale throughput across CPU cores without sacrificing ordering or safety.
 
 ## v0.9 - Production-grade Storage Format
 
-### Goal
-
-Harden the format for compatibility, durability, and recovery scenarios.
-
 ### Scope
 
 - Storage durability
 - Compatibility
 - Recovery
 
-### Key Features
+### Features
 
 - File footer index
 - Schema evolution
@@ -316,7 +262,7 @@ Harden the format for compatibility, durability, and recovery scenarios.
 - Corruption repair
 - Metadata migration
 
-### Exit Criteria
+### Definition of Done
 
 - Schema evolution supported
 - Backward compatibility tests pass
@@ -331,16 +277,12 @@ Harden the format for compatibility, durability, and recovery scenarios.
 
 ## v1.0 - Production Release
 
-### Goal
-
-Ship a stable, portable compression platform with production readiness.
-
 ### Scope
 
 - Stable
 - Portable compression platform
 
-### Key Features
+### Features
 
 - Stable format spec
 - Stable SDK APIs
@@ -349,7 +291,7 @@ Ship a stable, portable compression platform with production readiness.
 - Documentation
 - Release automation
 
-### Exit Criteria
+### Definition of Done
 
 - Full format specification published
 - Stable public APIs
@@ -370,13 +312,13 @@ Ship a stable, portable compression platform with production readiness.
   - Streaming snapshot
   - Analytics workload
 
-## End State
+## Finished State
 
-### Product Vision
+### Final vision
 
 `compact-core` becomes a portable columnar compression engine.
 
-### Target Use Cases
+### Usable for
 
 - Search engine
 - Streaming engine
@@ -386,7 +328,7 @@ Ship a stable, portable compression platform with production readiness.
 - Rate limiter persistence
 - Checkpointing
 
-### Skills Built Along the Way
+### Teaches
 
 - Compression
 - Storage engines
