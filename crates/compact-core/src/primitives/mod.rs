@@ -1,3 +1,1 @@
-pub fn encode() {}
-
-pub fn decode() {}
+pub mod codecs;

@@ -2,7 +2,6 @@ use std::io;
 
 use thiserror::Error;
 
-mod codecs;
 mod primitives;
 
 pub const MAGIC_V1: [u8; 4] = *b"CMP1";
