@@ -1,1 +1,1 @@
-pub mod codecs;
+mod codecs;

@@ -1,5 +1,7 @@
 use std::io;
 
+use crate::CompactError;
+
 ///
 /// Layouts: [count][byte][count][byte]...
 ///
@@ -27,29 +29,9 @@ pub fn encode_rle(data: &[u8]) -> Vec<u8> {
     result
 }
 
-pub fn encode_rle_rust_style(data: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len() * 2);
-
-    let mut iter = data.iter().peekable();
-
-    while let Some(&val) = iter.next() {
-        let mut count = 1u8;
-
-        while iter.peek() == Some(&&val) && count < u8::MAX {
-            iter.next();
-            count += 1;
-        }
-        result.push(count);
-        result.push(val);
-    }
-
-    result
-}
-
-pub fn decode_rle(data: &[u8]) -> Result<Vec<u8>, io::Error> {
+pub fn decode_rle(data: &[u8]) -> Result<Vec<u8>, CompactError> {
     if !data.len().is_multiple_of(2) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
+        return Err(CompactError::InvalidInput(
             "RLE data must have even length (count, value) pairs",
         ));
     }
@@ -60,10 +42,7 @@ pub fn decode_rle(data: &[u8]) -> Result<Vec<u8>, io::Error> {
         let count = chunk[0] as usize;
 
         if count == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "RLE run count of 0 is invalid",
-            ));
+            return Err(CompactError::InvalidInput("RLE run count of 0 is invalid"));
         }
 
         estimated_size += count;
@@ -83,8 +62,8 @@ pub fn decode_rle(data: &[u8]) -> Result<Vec<u8>, io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use crate::primitives::codecs::{decode_rle, encode_rle, encode_rle_rust_style};
-    use std::io;
+    use crate::CompactError;
+    use crate::primitives::codecs::{decode_rle, encode_rle};
 
     #[test]
     fn encode_rle_empty() {
@@ -108,15 +87,6 @@ mod tests {
         let encoded = encode_rle(&data);
 
         assert_eq!(encoded, vec![255, b'A', 45, b'A']);
-    }
-
-    #[test]
-    fn encode_rle_rust_style_same_output() {
-        let cases: Vec<&[u8]> = vec![b"", b"A", b"AAABBBCCC", b"ABC", b"AAAAABCCDDDD"];
-
-        for case in cases {
-            assert_eq!(encode_rle(case), encode_rle_rust_style(case));
-        }
     }
 
     #[test]
@@ -144,14 +114,14 @@ mod tests {
     fn decode_rle_rejects_odd_length_input() {
         let err = decode_rle(&[3, b'A', 2]).unwrap_err();
 
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(matches!(err, CompactError::InvalidInput(_)));
     }
 
     #[test]
     fn decode_rle_rejects_zero_count() {
         let err = decode_rle(&[0, b'A']).unwrap_err();
 
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(matches!(err, CompactError::InvalidInput(_)));
     }
 
     #[test]
