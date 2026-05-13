@@ -61,7 +61,7 @@ pub fn decode_rle(data: &[u8]) -> Result<Vec<u8>, CompactError> {
 #[cfg(test)]
 mod tests {
     use crate::CompactError;
-    use crate::primitives::codecs::{decode_rle, encode_rle};
+    use crate::primitives::rle::{decode_rle, encode_rle};
 
     #[test]
     fn encode_rle_empty() {

@@ -33,13 +33,24 @@ use crate::CompactError;
 /// - `encode_delta`: walk values and emit `base` + deltas
 /// - `decode_delta`: validate layout and rebuild values from deltas
 /// - private helpers: read/write typed values and deltas for the chosen layout
+///
+/// data type suite: timestamp increasing ids-metrics float-series
+///
 pub fn encode_delta(data: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(data.len() * 2);
+    /*REVIEWER [BLOCKER][CORRECTNESS]: this encoder silently drops all input.
+    WHY: returning an empty buffer for any non-empty payload turns valid data into an irreversible corruption event once this function is called from a real pipeline.
+    FIX: replace this stub with `CompactError::Unsupported("delta transform")` at the call boundary until the wire format and algorithm are implemented, or implement the full roundtrip with tests before exposing it.
+    */
+    let mut result = Vec::new();
 
     result
 }
 
 pub fn decode_delta(data: &[u8]) -> Result<Vec<u8>, CompactError> {
+    /*REVIEWER [BLOCKER][CORRECTNESS]: this decoder accepts arbitrary bytes and reports success with empty output.
+    WHY: malformed input is not rejected and valid input cannot be reconstructed, so callers would see silent data loss instead of a typed failure.
+    FIX: return `CompactError::Unsupported("delta transform")` until the format exists, then add strict validation for empty, truncated, and malformed layouts.
+    */
     let mut result = Vec::new();
 
     Ok(result)
