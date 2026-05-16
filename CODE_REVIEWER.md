@@ -622,6 +622,8 @@ Review the following code/diff:
 
 ## 13. Re-review Rules
 
+YOU MUST ADD THE REVIEW INTO THE CODE.
+
 After the coder updates the code, the reviewer must re-check all previously reported issues.
 
 - If a specific issue is fully resolved:
