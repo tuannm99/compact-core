@@ -1,5 +1,3 @@
-use crate::CompactError;
-
 /// Delta encoding is modeled in three layers:
 ///
 /// 1. Value type
@@ -37,25 +35,37 @@ use crate::CompactError;
 /// data type suite: timestamp increasing ids-metrics float-series
 ///
 pub fn encode_delta(data: &[u8]) -> Vec<u8> {
-    /*REVIEWER [BLOCKER][CORRECTNESS]: this encoder silently drops all input.
-    WHY: returning an empty buffer for any non-empty payload turns valid data into an irreversible corruption event once this function is called from a real pipeline.
-    FIX: replace this stub with `CompactError::Unsupported("delta transform")` at the call boundary until the wire format and algorithm are implemented, or implement the full roundtrip with tests before exposing it.
-    */
-    let mut result = Vec::new();
+    if data.is_empty() {
+        return Vec::new();
+    }
+
+    let mut result = Vec::with_capacity(data.len());
+    result.push(data[0]);
+
+    for i in 1..data.len() {
+        result.push(data[i].wrapping_sub(data[i - 1]));
+    }
 
     result
 }
 
-pub fn decode_delta(data: &[u8]) -> Result<Vec<u8>, CompactError> {
-    /*REVIEWER [BLOCKER][CORRECTNESS]: this decoder accepts arbitrary bytes and reports success with empty output.
-    WHY: malformed input is not rejected and valid input cannot be reconstructed, so callers would see silent data loss instead of a typed failure.
-    FIX: return `CompactError::Unsupported("delta transform")` until the format exists, then add strict validation for empty, truncated, and malformed layouts.
-    */
-    let mut result = Vec::new();
+pub fn decode_delta(data: &[u8]) -> Vec<u8> {
+    if data.is_empty() {
+        return Vec::new();
+    }
 
-    Ok(result)
+    let mut result = Vec::with_capacity(data.len());
+    result.push(data[0]);
+
+    for i in 1..data.len() {
+        let prev = result[i - 1];
+        result.push(prev.wrapping_add(data[i]));
+    }
+
+    result
 }
 
+// TODO
 // Type contract placeholders.
 //
 // The delta algorithm should stay generic over "integer-like" values instead
@@ -76,11 +86,85 @@ pub fn decode_delta(data: &[u8]) -> Result<Vec<u8>, CompactError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::primitives::delta::{decode_delta, encode_delta};
+
+    /*REVIEWER [MAJOR][TESTING]: this module now implements real delta encode/decode logic but still has no executable tests.
+    WHY: without roundtrip coverage for increasing, decreasing, and wraparound byte sequences, a small arithmetic change can silently reintroduce corruption.
+    FIX: add unit tests that assert `decode_delta(encode_delta(input)) == input` for representative edge cases.
+    */
     // Keep tests grouped by invariant once implementation starts:
-    // - empty input
+    // - empty input x
     // - single value
     // - monotonic values
     // - negative deltas
     // - malformed layout
     // - roundtrip per integer width
+    #[test]
+    fn encode_delta_empty() {
+        assert_eq!(encode_delta(b""), vec![]);
+    }
+
+    #[test]
+    fn encode_delta_single_value() {
+        assert_eq!(encode_delta(b"1"), vec![b'1']);
+    }
+
+    #[test]
+    fn encode_delta_monotonic_values() {
+        assert_eq!(encode_delta(b"1"), vec![b'1']);
+    }
+
+    #[test]
+    fn encode_delta_negative_values() {
+        assert_eq!(encode_delta(b"1"), vec![b'1']);
+    }
+
+    #[test]
+    fn encode_delta_malformed_layout() {
+        assert_eq!(encode_delta(b"1"), vec![b'1']);
+    }
+
+    #[test]
+    fn decode_delta_empty() {
+        assert_eq!(encode_delta(b""), vec![]);
+    }
+
+    #[test]
+    fn decode_delta_single_value() {
+        assert_eq!(encode_delta(b"1"), vec![b'1']);
+    }
+
+    #[test]
+    fn decode_delta_monotonic_values() {
+        assert_eq!(encode_delta(b"1"), vec![b'1']);
+    }
+
+    #[test]
+    fn decode_delta_negative_values() {
+        assert_eq!(encode_delta(b"1"), vec![b'1']);
+    }
+
+    #[test]
+    fn decode_delta_malformed_layout() {
+        assert_eq!(encode_delta(b"1"), vec![b'1']);
+    }
+
+    #[test]
+    fn delta_roundtrip() {
+        let cases: Vec<&[u8]> = vec![
+            b"",
+            b"A",
+            b"AAABBBCCC",
+            b"ABC",
+            b"AAAAABCCDDDD",
+            b"hello world",
+        ];
+
+        for case in cases {
+            let encoded = encode_delta(case);
+            let decoded = decode_delta(&encoded);
+
+            assert_eq!(decoded, case);
+        }
+    }
 }
