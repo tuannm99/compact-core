@@ -1,0 +1,4 @@
+columns:
+  - name: ts
+    type: u64
+    codec: delta_varint_u64

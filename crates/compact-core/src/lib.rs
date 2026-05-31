@@ -2,11 +2,12 @@ use std::io as std_io;
 
 use thiserror::Error;
 
-mod codecs;
-mod framing;
-mod io;
-mod primitives;
-mod schema;
+pub mod codecs;
+pub mod framing;
+pub mod io;
+pub mod pipeline;
+pub mod primitives;
+pub mod schema;
 mod transforms;
 
 pub const MAGIC_V1: [u8; 4] = *b"CMP1";
@@ -29,9 +30,10 @@ pub fn crate_version() -> &'static str {
 }
 
 pub fn checksum32(input: &[u8]) -> u32 {
-    crc32fast::hash(input)
+    primitives::crc32::checksum(input)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     RawBytes,
     U32,
@@ -40,18 +42,17 @@ pub enum ValueType {
     I64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transform {
     None,
     Delta,
-    /*REVIEWER [BLOCKER][CORRECTNESS]: delta transform is exposed before it has a safe implementation path.
-    WHY: the crate publishes `Transform::Delta`, but the current delta codec functions silently discard input and return empty output. Wiring this variant into any encode/decode flow would corrupt data instead of failing loudly.
-    FIX: hide this variant until delta is implemented, or ensure any public entrypoint using it returns `CompactError::Unsupported("delta transform")`.
-    */
     ZigZag,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Codec {
     Rle,
+    DeltaVarintU64,
     Huffman,
     Lz77,
 }
@@ -59,16 +60,80 @@ pub enum Codec {
 pub struct EncodeConfig {
     pub value_type: ValueType,
     pub transform: Transform,
-    /*REVIEWER [MAJOR][API_DESIGN]: this public config advertises capabilities the crate cannot execute yet.
-    WHY: callers can select unsupported codecs/transforms such as `Huffman`, `Lz77`, or the current stubbed `Delta`, but there is no public API that validates the choice or reports an explicit unsupported error.
-    FIX: keep this type private until the execution pipeline exists, or add a public encode/decode API that validates each combination and returns `CompactError::Unsupported` for unimplemented cases.
-    */
     pub codec: Codec,
+}
+
+impl EncodeConfig {
+    /// Validate whether this config is implemented by the current core crate.
+    ///
+    /// The enum contains future roadmap codecs so callers can model intent, but
+    /// execution paths should call this before starting work and fail loudly for
+    /// combinations that do not exist yet.
+    pub fn validate(&self) -> Result<()> {
+        match (self.value_type, self.transform, self.codec) {
+            (ValueType::RawBytes, Transform::None, Codec::Rle) => Ok(()),
+            (ValueType::U64, Transform::Delta, Codec::DeltaVarintU64) => Ok(()),
+            (_, _, Codec::Huffman) => Err(CompactError::Unsupported("huffman codec")),
+            (_, _, Codec::Lz77) => Err(CompactError::Unsupported("lz77 codec")),
+            _ => Err(CompactError::Unsupported("codec configuration")),
+        }
+    }
+}
+
+/// Encode raw bytes with the configured byte codec and wrap the result in a v1 frame.
+pub fn encode_bytes_frame(config: &EncodeConfig, input: &[u8]) -> Result<Vec<u8>> {
+    config.validate()?;
+
+    let payload = codecs::encode_bytes(config, input)?;
+
+    Ok(framing::encode_v1(config.codec, &payload))
+}
+
+/// Decode a v1 frame, validate its codec against `config`, then decode raw bytes.
+pub fn decode_bytes_frame(config: &EncodeConfig, frame: &[u8]) -> Result<Vec<u8>> {
+    config.validate()?;
+
+    let frame = framing::decode_v1(frame)?;
+    ensure_frame_codec(config, frame.codec)?;
+
+    codecs::decode_bytes(config, &frame.payload)
+}
+
+/// Encode `u64` values with the configured numeric codec and wrap the result in a v1 frame.
+pub fn encode_u64_frame(config: &EncodeConfig, values: &[u64]) -> Result<Vec<u8>> {
+    config.validate()?;
+
+    let payload = codecs::encode_u64(config, values)?;
+
+    Ok(framing::encode_v1(config.codec, &payload))
+}
+
+/// Decode a v1 frame, validate its codec against `config`, then decode `u64` values.
+pub fn decode_u64_frame(config: &EncodeConfig, frame: &[u8]) -> Result<Vec<u64>> {
+    config.validate()?;
+
+    let frame = framing::decode_v1(frame)?;
+    ensure_frame_codec(config, frame.codec)?;
+
+    codecs::decode_u64(config, &frame.payload)
+}
+
+fn ensure_frame_codec(config: &EncodeConfig, actual: Codec) -> Result<()> {
+    if actual != config.codec {
+        return Err(CompactError::InvalidInput(
+            "frame codec does not match requested config",
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MAGIC_V1, VERSION_V1, checksum32, crate_version};
+    use super::{
+        Codec, CompactError, EncodeConfig, MAGIC_V1, Transform, VERSION_V1, ValueType, checksum32,
+        crate_version, decode_bytes_frame, decode_u64_frame, encode_bytes_frame, encode_u64_frame,
+    };
 
     #[test]
     fn version_is_set() {
@@ -84,5 +149,71 @@ mod tests {
     #[test]
     fn checksum_is_stable() {
         assert_eq!(checksum32(b"compact"), 0x84_a0_0b_bf);
+    }
+
+    #[test]
+    fn bytes_frame_rle_roundtrip() {
+        let config = EncodeConfig {
+            value_type: ValueType::RawBytes,
+            transform: Transform::None,
+            codec: Codec::Rle,
+        };
+        let encoded = encode_bytes_frame(&config, b"AAABBBCCC").unwrap();
+        let decoded = decode_bytes_frame(&config, &encoded).unwrap();
+
+        assert_eq!(decoded, b"AAABBBCCC");
+    }
+
+    #[test]
+    fn u64_frame_delta_varint_roundtrip() {
+        let config = EncodeConfig {
+            value_type: ValueType::U64,
+            transform: Transform::Delta,
+            codec: Codec::DeltaVarintU64,
+        };
+        let values = [100, 101, 102, 130];
+        let encoded = encode_u64_frame(&config, &values).unwrap();
+        let decoded = decode_u64_frame(&config, &encoded).unwrap();
+
+        assert_eq!(decoded, values);
+    }
+
+    #[test]
+    fn frame_decode_rejects_codec_config_mismatch() {
+        let encode_config = EncodeConfig {
+            value_type: ValueType::RawBytes,
+            transform: Transform::None,
+            codec: Codec::Rle,
+        };
+        let decode_config = EncodeConfig {
+            value_type: ValueType::U64,
+            transform: Transform::Delta,
+            codec: Codec::DeltaVarintU64,
+        };
+        let encoded = encode_bytes_frame(&encode_config, b"AAABBBCCC").unwrap();
+        let err = decode_u64_frame(&decode_config, &encoded).unwrap_err();
+
+        assert!(matches!(
+            err,
+            CompactError::InvalidInput("frame codec does not match requested config")
+        ));
+    }
+
+    #[test]
+    fn bytes_frame_rejects_corrupted_payload() {
+        let config = EncodeConfig {
+            value_type: ValueType::RawBytes,
+            transform: Transform::None,
+            codec: Codec::Rle,
+        };
+        let mut encoded = encode_bytes_frame(&config, b"AAABBBCCC").unwrap();
+        let last = encoded.len() - 1;
+        encoded[last] ^= 0xff;
+        let err = decode_bytes_frame(&config, &encoded).unwrap_err();
+
+        assert!(matches!(
+            err,
+            CompactError::InvalidInput("frame checksum mismatch")
+        ));
     }
 }

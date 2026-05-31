@@ -1,6 +1,13 @@
 use crate::CompactError;
 
+/// Encode unsigned 64-bit integers with base-128 varint encoding.
+///
+/// A varint stores seven payload bits per byte. The high bit (`0x80`) is a
+/// continuation flag: it is set while more bytes are needed and cleared on the
+/// final byte for the current integer.
 pub fn encode_u64(values: &[u64]) -> Vec<u8> {
+    // `u64::MAX` needs at most 10 base-128 bytes, so this avoids repeated
+    // growth for the worst case while still allowing small values to shrink.
     let mut out = Vec::with_capacity(values.len() * 10);
 
     for &v in values {
@@ -17,33 +24,45 @@ pub fn encode_u64(values: &[u64]) -> Vec<u8> {
     out
 }
 
+/// Decode canonical base-128 varints into unsigned 64-bit integers.
+///
+/// The decoder is intentionally strict. It rejects truncated streams,
+/// encodings that need more than 64 payload bits, and overlong encodings such
+/// as `[0x80, 0x00]` for zero. Keeping only one valid byte sequence per integer
+/// matters for checksums, file comparison, and corruption detection.
 pub fn decode_u64(data: &[u8]) -> Result<Vec<u64>, CompactError> {
     let mut out = Vec::new();
 
     let mut value = 0u64;
     let mut shift = 0u32;
+    let mut bytes_read = 0usize;
 
     for &byte in data {
         let part = (byte & 0x7f) as u64;
 
-        /*REVIEWER [BLOCKER][CORRECTNESS]: the decoder accepts invalid 10-byte sequences whose last payload bits overflow `u64`.
-        WHY: after nine continuation bytes `shift == 63`, so a final byte such as `0x02` is silently truncated by `part << shift` instead of being rejected. That decodes malformed input to the wrong integer and breaks wire-format validation.
-        FIX: reject any byte once `shift == 63` unless `part <= 1` and the byte is terminal, or switch to `checked_shl`/explicit length validation so overflowing payload bits return `CompactError::InvalidInput(\"varint overflow\")`.
-        */
-        if shift >= 64 {
+        // A `u64` can use 9 full groups of 7 bits plus 1 final payload bit.
+        // At shift 63, only payload values 0 or 1 fit, and byte 10 must be the
+        // terminal byte. Anything larger would require more than 64 bits.
+        if shift == 63 && (part > 1 || byte & 0x80 != 0) {
+            return Err(CompactError::InvalidInput("varint overflow"));
+        }
+
+        if shift > 63 {
             return Err(CompactError::InvalidInput("varint overflow"));
         }
 
         value |= part << shift;
+        bytes_read += 1;
 
         if byte & 0x80 == 0 {
-            /*REVIEWER [BLOCKER][CORRECTNESS]: the decoder accepts overlong encodings such as `[0x80, 0x00]` for zero.
-            WHY: multiple byte sequences then map to the same integer, which makes the wire format non-canonical and defeats any caller that relies on a single stable encoding for hashing, deduplication, or validation.
-            FIX: track how many bytes were consumed for the current value and reject any representation that is longer than the minimal varint encoding for the decoded integer.
-            */
+            if bytes_read != encoded_len(value) {
+                return Err(CompactError::InvalidInput("overlong varint"));
+            }
+
             out.push(value);
             value = 0;
             shift = 0;
+            bytes_read = 0;
         } else {
             shift += 7;
         }
@@ -56,6 +75,17 @@ pub fn decode_u64(data: &[u8]) -> Result<Vec<u64>, CompactError> {
     Ok(out)
 }
 
+fn encoded_len(mut value: u64) -> usize {
+    let mut len = 1;
+
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+
+    len
+}
+
 #[cfg(test)]
 mod tests {
     use super::{decode_u64, encode_u64};
@@ -63,7 +93,7 @@ mod tests {
 
     #[test]
     fn encode_u64_edgecase() {
-        assert_eq!(encode_u64(&[]), vec![]);
+        assert_eq!(encode_u64(&[]), Vec::<u8>::new());
         assert_eq!(encode_u64(&[0]), vec![0x00]);
         assert_eq!(encode_u64(&[1]), vec![0x01]);
         assert_eq!(encode_u64(&[127]), vec![0x7f]);
