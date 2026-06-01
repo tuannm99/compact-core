@@ -4,6 +4,7 @@
 - `crates/compact-cli`: command-line entrypoint for encode/decode/inspect/bench
 - `crates/compact-ffi`: stable C ABI for other languages
 - `bindings/go`: first consumer binding over the C ABI
+- `fuzz`: libFuzzer targets for decode safety, documented in [fuzzing.md](fuzzing.md)
 
 Implementation order follows the milestone list:
 

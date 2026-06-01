@@ -33,7 +33,7 @@
 - Benchmark command exists
 - Basic Go binding works
 - 80%+ unit test coverage for core crate
-- Fuzz test exists for frame decoder
+- Fuzz test exists for frame decoder, documented in [fuzzing.md](fuzzing.md)
 - Corrupted file never panics
 - Invalid frame handled safely
 - CI passes on Linux and macOS
