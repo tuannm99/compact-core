@@ -36,6 +36,7 @@ pub fn checksum32(input: &[u8]) -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueType {
     RawBytes,
+    String,
     U32,
     U64,
     I32,
@@ -53,6 +54,7 @@ pub enum Transform {
 pub enum Codec {
     Rle,
     DeltaVarintU64,
+    ColumnBlock,
     Huffman,
     Lz77,
 }
@@ -72,7 +74,9 @@ impl EncodeConfig {
     pub fn validate(&self) -> Result<()> {
         match (self.value_type, self.transform, self.codec) {
             (ValueType::RawBytes, Transform::None, Codec::Rle) => Ok(()),
+            (ValueType::String, Transform::None, Codec::Rle) => Ok(()),
             (ValueType::U64, Transform::Delta, Codec::DeltaVarintU64) => Ok(()),
+            (_, _, Codec::ColumnBlock) => Ok(()),
             (_, _, Codec::Huffman) => Err(CompactError::Unsupported("huffman codec")),
             (_, _, Codec::Lz77) => Err(CompactError::Unsupported("lz77 codec")),
             _ => Err(CompactError::Unsupported("codec configuration")),

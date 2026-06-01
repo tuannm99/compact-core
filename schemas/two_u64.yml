@@ -1,0 +1,7 @@
+columns:
+  - name: ts
+    type: u64
+    codec: delta_varint_u64
+  - name: user_id
+    type: u64
+    codec: delta_varint_u64

@@ -1,0 +1,10 @@
+columns:
+  - name: ts
+    type: u64
+    codec: delta_varint_u64
+  - name: level
+    type: string
+    codec: rle
+  - name: message
+    type: string
+    codec: rle

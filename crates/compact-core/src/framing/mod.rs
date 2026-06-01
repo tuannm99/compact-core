@@ -11,6 +11,7 @@ const CODEC_RLE: u8 = 0x01;
 const CODEC_DELTA_VARINT_U64: u8 = 0x02;
 const CODEC_HUFFMAN: u8 = 0x03;
 const CODEC_LZ77: u8 = 0x04;
+const CODEC_COLUMN_BLOCK: u8 = 0x10;
 
 const MAGIC_LEN: usize = 4;
 const VERSION_LEN: usize = 1;
@@ -110,6 +111,7 @@ fn codec_to_id(codec: Codec) -> u8 {
     match codec {
         Codec::Rle => CODEC_RLE,
         Codec::DeltaVarintU64 => CODEC_DELTA_VARINT_U64,
+        Codec::ColumnBlock => CODEC_COLUMN_BLOCK,
         Codec::Huffman => CODEC_HUFFMAN,
         Codec::Lz77 => CODEC_LZ77,
     }
@@ -119,6 +121,7 @@ fn id_to_codec(id: u8) -> Result<Codec, CompactError> {
     match id {
         CODEC_RLE => Ok(Codec::Rle),
         CODEC_DELTA_VARINT_U64 => Ok(Codec::DeltaVarintU64),
+        CODEC_COLUMN_BLOCK => Ok(Codec::ColumnBlock),
         CODEC_HUFFMAN => Ok(Codec::Huffman),
         CODEC_LZ77 => Ok(Codec::Lz77),
         _ => Err(CompactError::Unsupported("codec id")),
