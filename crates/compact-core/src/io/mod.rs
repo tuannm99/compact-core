@@ -5,6 +5,8 @@
 //! column, encoding each column independently, and storing those column payloads
 //! inside one outer frame.
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Value};
 
 use crate::primitives::{rle, varint};
@@ -15,6 +17,21 @@ const COLUMN_BLOCK_MAGIC: [u8; 4] = *b"CBL1";
 const COLUMN_COUNT_LEN: usize = 4;
 const NAME_LEN_LEN: usize = 2;
 const ROW_COUNT_LEN: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JsonlInspect {
+    pub outer_codec: Codec,
+    pub payload_len: usize,
+    pub columns: Vec<ColumnInspect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnInspect {
+    pub name: String,
+    pub codec: SchemaCodec,
+    pub row_count: usize,
+    pub payload_len: usize,
+}
 
 /// Encode JSONL rows using required schema columns.
 pub fn encode_jsonl(input: &str, schema: &Schema) -> Result<Vec<u8>> {
@@ -76,6 +93,24 @@ pub fn decode_jsonl(frame: &[u8], schema: &Schema) -> Result<String> {
     }
 
     Ok(out)
+}
+
+pub fn inspect_jsonl(frame: &[u8]) -> Result<JsonlInspect> {
+    let outer = framing::decode_v1(frame)?;
+
+    if outer.codec != Codec::ColumnBlock {
+        return Err(CompactError::InvalidInput(
+            "frame is not a jsonl column block",
+        ));
+    }
+
+    let columns = inspect_column_blocks(&outer.payload)?;
+
+    Ok(JsonlInspect {
+        outer_codec: outer.codec,
+        payload_len: outer.payload.len(),
+        columns,
+    })
 }
 
 fn parse_jsonl_object(line: &str) -> Result<Map<String, Value>> {
@@ -209,10 +244,83 @@ fn decode_column_blocks(
     Ok(decoded)
 }
 
+fn inspect_column_blocks(data: &[u8]) -> Result<Vec<ColumnInspect>> {
+    let mut cursor = 0usize;
+
+    read_exact(
+        data,
+        &mut cursor,
+        COLUMN_BLOCK_MAGIC.len(),
+        "column block header is truncated",
+    )
+    .and_then(|magic| {
+        if magic != COLUMN_BLOCK_MAGIC {
+            return Err(CompactError::InvalidInput("invalid column block magic"));
+        }
+
+        Ok(())
+    })?;
+
+    let column_count = read_u32(data, &mut cursor, "column block count is truncated")? as usize;
+    let mut columns = Vec::with_capacity(column_count);
+
+    for _ in 0..column_count {
+        let name_len = read_u16(data, &mut cursor, "column name length is truncated")? as usize;
+        let name_bytes = read_exact(data, &mut cursor, name_len, "column name is truncated")?;
+        let name = std::str::from_utf8(name_bytes)
+            .map_err(|_| CompactError::InvalidInput("column name must be utf-8"))?;
+        let codec = id_to_schema_codec(read_u8(data, &mut cursor, "column codec is truncated")?)?;
+        let row_count = usize::try_from(read_u64(
+            data,
+            &mut cursor,
+            "column row count is truncated",
+        )?)
+        .map_err(|_| CompactError::InvalidInput("column row count is too large"))?;
+        let payload_len = usize::try_from(read_u64(
+            data,
+            &mut cursor,
+            "column payload length is truncated",
+        )?)
+        .map_err(|_| CompactError::InvalidInput("column payload length is too large"))?;
+
+        read_exact(
+            data,
+            &mut cursor,
+            payload_len,
+            "column payload is truncated",
+        )?;
+
+        columns.push(ColumnInspect {
+            name: name.to_owned(),
+            codec,
+            row_count,
+            payload_len,
+        });
+    }
+
+    if cursor != data.len() {
+        return Err(CompactError::InvalidInput(
+            "column block has trailing bytes",
+        ));
+    }
+
+    Ok(columns)
+}
+
 fn codec_to_id(codec: crate::schema::SchemaCodec) -> u8 {
     match codec {
+        crate::schema::SchemaCodec::Dictionary => 0x05,
         crate::schema::SchemaCodec::DeltaVarintU64 => 0x02,
         crate::schema::SchemaCodec::Rle => 0x01,
+    }
+}
+
+fn id_to_schema_codec(id: u8) -> Result<SchemaCodec> {
+    match id {
+        0x01 => Ok(SchemaCodec::Rle),
+        0x02 => Ok(SchemaCodec::DeltaVarintU64),
+        0x05 => Ok(SchemaCodec::Dictionary),
+        _ => Err(CompactError::Unsupported("column codec id")),
     }
 }
 
@@ -284,7 +392,9 @@ impl ColumnValues {
     fn new(column: &ColumnSchema) -> Result<Self> {
         match (column.value_type, column.codec) {
             (SchemaValueType::U64, SchemaCodec::DeltaVarintU64) => Ok(Self::U64(Vec::new())),
-            (SchemaValueType::String, SchemaCodec::Rle) => Ok(Self::String(Vec::new())),
+            (SchemaValueType::String, SchemaCodec::Dictionary | SchemaCodec::Rle) => {
+                Ok(Self::String(Vec::new()))
+            }
             _ => Err(CompactError::Unsupported("schema column codec")),
         }
     }
@@ -311,7 +421,11 @@ impl ColumnValues {
     fn encode(&self, column: &ColumnSchema) -> Result<Vec<u8>> {
         match self {
             Self::U64(values) => codecs::encode_u64(&column.encode_config(), values),
-            Self::String(values) => encode_string_values(values),
+            Self::String(values) => match column.codec {
+                SchemaCodec::Dictionary => encode_dictionary_values(values),
+                SchemaCodec::Rle => encode_string_values(values),
+                _ => Err(CompactError::Unsupported("schema column codec")),
+            },
         }
     }
 }
@@ -329,6 +443,9 @@ impl DecodedValues {
             }
             (SchemaValueType::String, SchemaCodec::Rle) => {
                 decode_string_values(payload).map(Self::String)
+            }
+            (SchemaValueType::String, SchemaCodec::Dictionary) => {
+                decode_dictionary_values(payload).map(Self::String)
             }
             _ => Err(CompactError::Unsupported("schema column codec")),
         }
@@ -363,6 +480,41 @@ fn encode_string_values(values: &[String]) -> Result<Vec<u8>> {
     Ok(rle::encode_rle(&raw))
 }
 
+fn encode_dictionary_values(values: &[String]) -> Result<Vec<u8>> {
+    let mut dictionary = Vec::<String>::new();
+    let mut ids = Vec::<u64>::with_capacity(values.len());
+    let mut index_by_value = HashMap::<&str, u64>::new();
+
+    for value in values {
+        let id = if let Some(&id) = index_by_value.get(value.as_str()) {
+            id
+        } else {
+            let id = u64::try_from(dictionary.len())
+                .map_err(|_| CompactError::InvalidInput("dictionary has too many values"))?;
+            dictionary.push(value.clone());
+            index_by_value.insert(value.as_str(), id);
+            id
+        };
+
+        ids.push(id);
+    }
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&varint::encode_u64(&[dictionary.len() as u64]));
+
+    for value in dictionary {
+        let bytes = value.as_bytes();
+        let len = u64::try_from(bytes.len())
+            .map_err(|_| CompactError::InvalidInput("string value too large"))?;
+        raw.extend_from_slice(&varint::encode_u64(&[len]));
+        raw.extend_from_slice(bytes);
+    }
+
+    raw.extend_from_slice(&varint::encode_u64(&ids));
+
+    Ok(raw)
+}
+
 fn decode_string_values(payload: &[u8]) -> Result<Vec<String>> {
     let raw = rle::decode_rle(payload)?;
     let mut cursor = 0usize;
@@ -377,6 +529,36 @@ fn decode_string_values(payload: &[u8]) -> Result<Vec<String>> {
             .map_err(|_| CompactError::InvalidInput("string value must be utf-8"))?;
 
         values.push(value.to_owned());
+    }
+
+    Ok(values)
+}
+
+fn decode_dictionary_values(payload: &[u8]) -> Result<Vec<String>> {
+    let mut cursor = 0usize;
+    let dictionary_len = usize::try_from(read_varint_u64(payload, &mut cursor)?)
+        .map_err(|_| CompactError::InvalidInput("dictionary length is too large"))?;
+    let mut dictionary = Vec::with_capacity(dictionary_len);
+
+    for _ in 0..dictionary_len {
+        let len = usize::try_from(read_varint_u64(payload, &mut cursor)?)
+            .map_err(|_| CompactError::InvalidInput("string length is too large"))?;
+        let bytes = read_exact(payload, &mut cursor, len, "dictionary string is truncated")?;
+        let value = std::str::from_utf8(bytes)
+            .map_err(|_| CompactError::InvalidInput("string value must be utf-8"))?;
+        dictionary.push(value.to_owned());
+    }
+
+    let ids = varint::decode_u64(&payload[cursor..])?;
+    let mut values = Vec::with_capacity(ids.len());
+
+    for id in ids {
+        let index = usize::try_from(id)
+            .map_err(|_| CompactError::InvalidInput("dictionary id is too large"))?;
+        let value = dictionary
+            .get(index)
+            .ok_or(CompactError::InvalidInput("dictionary id out of range"))?;
+        values.push(value.clone());
     }
 
     Ok(values)

@@ -32,6 +32,7 @@ pub enum SchemaValueType {
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SchemaCodec {
+    Dictionary,
     DeltaVarintU64,
     Rle,
 }
@@ -56,6 +57,7 @@ impl Schema {
         for column in &self.columns {
             match (column.value_type, column.codec) {
                 (SchemaValueType::U64, SchemaCodec::DeltaVarintU64) => {}
+                (SchemaValueType::String, SchemaCodec::Dictionary) => {}
                 (SchemaValueType::String, SchemaCodec::Rle) => {}
                 _ => return Err(CompactError::Unsupported("schema column codec")),
             }
@@ -77,6 +79,11 @@ impl ColumnSchema {
                 value_type: ValueType::String,
                 transform: Transform::None,
                 codec: Codec::Rle,
+            },
+            (SchemaValueType::String, SchemaCodec::Dictionary) => crate::EncodeConfig {
+                value_type: ValueType::String,
+                transform: Transform::None,
+                codec: Codec::ColumnBlock,
             },
             _ => crate::EncodeConfig {
                 value_type: ValueType::RawBytes,
@@ -105,7 +112,7 @@ columns:
     codec: delta_varint_u64
   - name: level
     type: string
-    codec: rle
+    codec: dictionary
 "#,
         )
         .unwrap();
@@ -119,7 +126,7 @@ columns:
         assert_eq!(columns[1].name, "user_id");
         assert_eq!(columns[2].name, "level");
         assert_eq!(columns[2].value_type, SchemaValueType::String);
-        assert_eq!(columns[2].codec, SchemaCodec::Rle);
+        assert_eq!(columns[2].codec, SchemaCodec::Dictionary);
     }
 
     #[test]

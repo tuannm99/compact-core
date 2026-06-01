@@ -4,7 +4,7 @@ columns:
     codec: delta_varint_u64
   - name: level
     type: string
-    codec: rle
+    codec: dictionary
   - name: message
     type: string
-    codec: rle
+    codec: dictionary
