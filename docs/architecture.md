@@ -6,6 +6,8 @@
 - `bindings/go`: first consumer binding over the C ABI
 - `fuzz`: libFuzzer targets for decode safety, documented in [fuzzing.md](fuzzing.md)
 
+The v0.1 support contract is documented in [v0.1.md](v0.1.md).
+
 Implementation order follows the milestone list:
 
 1. primitives
