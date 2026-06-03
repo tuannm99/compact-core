@@ -2503,7 +2503,25 @@ Compression is data-distribution-dependent.
 
 ---
 
-# 12. Practical Rules for compact-core
+# 12. Streaming Block Engine Knowledge for v0.2
+
+The detailed v0.2 streaming knowledge has been split into smaller files under [`streaming`](streaming/README.md).
+
+Start with:
+
+- [Streaming concepts](streaming/01-concepts.md)
+- [Block sizing](streaming/02-block-sizing.md)
+- [Streaming JSONL parsing](streaming/03-jsonl-parsing.md)
+- [Reader and writer APIs](streaming/04-reader-writer-api.md)
+- [File layout](streaming/05-file-layout.md)
+- [Corruption, backpressure, and memory](streaming/06-corruption-memory.md)
+- [CLI, inspect, and benchmarks](streaming/07-cli-inspect-bench.md)
+- [Testing plan](streaming/08-testing-plan.md)
+- [Implementation plan](streaming/09-implementation-plan.md)
+
+---
+
+# 13. Practical Rules for compact-core
 
 Use these rules:
 
@@ -2528,7 +2546,7 @@ Use these rules:
 
 ---
 
-# 13. Most Important Reminder
+# 14. Most Important Reminder
 
 Compression is not just algorithms.
 
