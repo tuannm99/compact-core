@@ -81,7 +81,15 @@ metadata is still pending.
 
 ## Benchmarks for v0.2
 
-Streaming benchmark should measure:
+Current streaming benchmark command:
+
+```text
+compact bench input.jsonl --schema schema.yml
+compact bench input.jsonl --schema schema.yml --block-rows 10000
+compact bench input.jsonl --schema schema.yml --block-bytes 8388608
+```
+
+The streaming benchmark measures:
 
 - input bytes
 - output bytes
@@ -90,7 +98,25 @@ Streaming benchmark should measure:
 - decode MB/s
 - block count
 - block size setting
-- peak memory estimate if available
+
+Current output:
+
+```text
+mode: stream
+block_rows: 10000
+block_bytes: 8388608
+blocks: 42
+rows: 420000
+input_bytes: ...
+encoded_bytes: ...
+compression_ratio: ...
+encode_ms: ...
+decode_ms: ...
+encode_mib_s: ...
+decode_mib_s: ...
+```
+
+Peak memory estimate is not implemented yet.
 
 Datasets:
 

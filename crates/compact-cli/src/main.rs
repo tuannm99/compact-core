@@ -42,6 +42,10 @@ enum Commands {
         input: String,
         #[arg(long)]
         schema: String,
+        #[arg(long)]
+        block_rows: Option<usize>,
+        #[arg(long)]
+        block_bytes: Option<usize>,
     },
 }
 
@@ -124,28 +128,63 @@ fn main() -> Result<()> {
             let frame = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
             inspect_file(&frame)?;
         }
-        Commands::Bench { input, schema } => {
+        Commands::Bench {
+            input,
+            schema,
+            block_rows,
+            block_bytes,
+        } => {
             let schema = load_schema(&schema)?;
+            let options = block_options(block_rows, block_bytes)
+                .context("invalid streaming block options")?;
             let input_text = fs::read_to_string(&input)
                 .with_context(|| format!("failed to read {input} as UTF-8 JSONL"))?;
+            let input_bytes = input_text.len() as u64;
             let encode_start = Instant::now();
-            let encoded = compact_core::io::encode_jsonl(&input_text, &schema)
-                .context("failed to encode JSONL input")?;
+            let encoded = compact_core::streaming::encode_jsonl_stream(
+                BufReader::new(Cursor::new(input_text.as_bytes())),
+                Vec::new(),
+                schema.clone(),
+                options,
+            )
+            .context("failed to stream encode JSONL benchmark input")?;
             let encode_elapsed = encode_start.elapsed();
+            let inspect = compact_core::streaming::inspect_stream(Cursor::new(&encoded))
+                .context("failed to inspect benchmark stream")?;
             let decode_start = Instant::now();
-            let decoded = compact_core::io::decode_jsonl(&encoded, &schema)
-                .context("failed to decode JSONL frame")?;
+            let decoded = compact_core::streaming::decode_jsonl_stream(
+                Cursor::new(&encoded),
+                Vec::new(),
+                schema,
+            )
+            .context("failed to stream decode JSONL benchmark input")?;
             let decode_elapsed = decode_start.elapsed();
 
-            if decoded != input_text {
+            if decoded != input_text.as_bytes() {
                 anyhow::bail!("benchmark roundtrip mismatch");
             }
 
-            println!("input_bytes: {}", input_text.len());
+            println!("mode: stream");
+            println!("block_rows: {}", options.max_rows_per_block);
+            println!("block_bytes: {}", options.max_uncompressed_bytes_per_block);
+            println!("blocks: {}", inspect.blocks.len());
+            println!("rows: {}", inspect.total_rows);
+            println!("input_bytes: {}", input_bytes);
             println!("encoded_bytes: {}", encoded.len());
-            print_ratio(input_text.len() as u64, encoded.len() as u64);
+            println!(
+                "compression_ratio: {:.4}",
+                compression_ratio(input_bytes, encoded.len() as u64)
+            );
             println!("encode_ms: {:.3}", encode_elapsed.as_secs_f64() * 1000.0);
             println!("decode_ms: {:.3}", decode_elapsed.as_secs_f64() * 1000.0);
+            println!(
+                "encode_mib_s: {:.3}",
+                mib_per_second(input_bytes, encode_elapsed.as_secs_f64())
+            );
+            println!(
+                "decode_mib_s: {:.3}",
+                mib_per_second(input_bytes, decode_elapsed.as_secs_f64())
+            );
         }
     }
 
@@ -246,12 +285,26 @@ fn block_options(
 }
 
 fn print_ratio(input_len: u64, output_len: u64) {
-    let ratio = if input_len == 0 {
+    println!("input_bytes: {input_len}");
+    println!("output_bytes: {output_len}");
+    println!(
+        "compression_ratio: {:.4}",
+        compression_ratio(input_len, output_len)
+    );
+}
+
+fn compression_ratio(input_len: u64, output_len: u64) -> f64 {
+    if input_len == 0 {
         1.0
     } else {
         output_len as f64 / input_len as f64
-    };
-    println!("input_bytes: {input_len}");
-    println!("output_bytes: {output_len}");
-    println!("compression_ratio: {ratio:.4}");
+    }
+}
+
+fn mib_per_second(bytes: u64, seconds: f64) -> f64 {
+    if seconds == 0.0 {
+        return 0.0;
+    }
+
+    (bytes as f64 / 1024.0 / 1024.0) / seconds
 }
