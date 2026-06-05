@@ -1,8 +1,32 @@
 # v0.2 Implementation Plan
 
+## Current Status
+
+Phase 1 is implemented:
+
+- `CMP2` stream header.
+- `BLK1` block payload inside checksum-verified v1 frames.
+- `BlockOptions` with default `10,000` rows and `8 MiB`.
+- Row-group extraction from the v0.1 one-shot JSONL encoder.
+- `JsonlBlockWriter<W: Write>`.
+- `JsonlBlockReader<R: Read>`.
+- `encode_jsonl_stream<R: BufRead, W: Write>`.
+- `decode_jsonl_stream<R: Read, W: Write>`.
+- CLI schema encode/decode uses streaming helpers.
+- CLI schema encode supports `--block-rows` and `--block-bytes`.
+- `compact inspect` understands `CMP2` and shows block metadata.
+
+Still pending for v0.2 release:
+
+- Streaming benchmark command.
+- Large generated JSONL validation.
+- Persisted footer index decision.
+- Optional column metadata in stream inspect.
+- CLI integration tests around encode/decode/inspect.
+
 Recommended order:
 
-1. Define `BlockOptions`.
+1. Define `BlockOptions`. Done.
 
 ```rust
 pub struct BlockOptions {
@@ -11,7 +35,7 @@ pub struct BlockOptions {
 }
 ```
 
-2. Define row group buffer.
+2. Define row group buffer. Done in the writer as a bounded raw JSONL buffer.
 
 ```rust
 struct RowGroupBuffer {
@@ -22,21 +46,21 @@ struct RowGroupBuffer {
 ```
 
 3. Extract current one-shot column-block encode logic so it can encode one row
-   group.
+   group. Done via `encode_jsonl_row_group`.
 
-4. Add `JsonlBlockWriter<W: Write>`.
+4. Add `JsonlBlockWriter<W: Write>`. Done.
 
-5. Add `encode_jsonl_stream<R: BufRead, W: Write>`.
+5. Add `encode_jsonl_stream<R: BufRead, W: Write>`. Done.
 
-6. Add `JsonlBlockReader<R: Read>`.
+6. Add `JsonlBlockReader<R: Read>`. Done.
 
-7. Add `decode_jsonl_stream<R: Read, W: Write>`.
+7. Add `decode_jsonl_stream<R: Read, W: Write>`. Done.
 
-8. Update CLI to use stream functions.
+8. Update CLI to use stream functions. Done for schema encode/decode.
 
-9. Add inspect block metadata.
+9. Add inspect block metadata. Done for `CMP2` scan-time metadata.
 
-10. Add benchmarks and large generated test.
+10. Add benchmarks and large generated test. Pending.
 
 Do not start with async.
 
@@ -65,11 +89,11 @@ Recommended answers for first v0.2 implementation:
 ```text
 magic: CMP2
 schema: external for now
-index: collect inline metadata first, footer later
+index: collect inline scan metadata first, footer later
 blocks: independently decodable
 dictionary: reset per block
 decode corruption: stop by default
-inspect corruption: report what can be safely read
+inspect corruption: stop at first invalid frame for now
 block limits: rows and bytes
 default rows: 10,000
 default bytes: 8 MiB

@@ -63,6 +63,12 @@ Build the first end-to-end offline compression pipeline for JSONL data.
 
 ## v0.2 - Streaming Block Engine
 
+Status: phase 1 implemented. The sequential `CMP2` block stream can encode,
+decode, and inspect schema-based JSONL without full-file buffering in the CLI.
+The remaining v0.2 work is validation at larger scale, streaming benchmarks,
+and deciding whether the release needs a persisted footer index or scan-only
+block indexing.
+
 ### Goal
 
 Support large files with bounded memory and streaming encode/decode flows.
@@ -75,27 +81,32 @@ Support large files with bounded memory and streaming encode/decode flows.
 
 ### Key Features
 
-- Streaming writer
-- Streaming reader
-- Configurable block size
-- Incremental flush
+- Streaming writer: implemented for schema-based JSONL
+- Streaming reader: implemented for sequential decode
+- Configurable block size: implemented with `--block-rows` and `--block-bytes`
+- Incremental flush: implemented by row and byte limits
 - Partial decode
-- Row iterator
-- Column chunk metadata
+- Row iterator: not implemented yet
+- Column chunk metadata: not implemented yet beyond existing column-block
+  payload metadata
 
 ### Exit Criteria
 
-- Encode/decode a 10 GB file without OOM
-- Memory stays under a configurable limit
-- Streaming decode supports sequential scan
-- Partial block corruption is isolated
-- Block index implemented
-- `compact inspect` shows block metadata
-- Throughput benchmark included
+- Encode/decode a 10 GB file without OOM: pending large-file validation
+- Memory stays under a configurable limit: partially implemented by block
+  options, pending measured validation
+- Streaming decode supports sequential scan: implemented
+- Partial block corruption is isolated: implemented at frame/block checksum
+  boundary for sequential decode
+- Block index implemented: partially implemented by scan-time inline metadata;
+  persisted footer index is pending decision
+- `compact inspect` shows block metadata: implemented for `CMP2`
+- Throughput benchmark included: pending
 - Decode throughput is higher than encode throughput
-- Backpressure-safe writer API
-- No full-file buffering
-- All codecs support streaming mode
+- Backpressure-safe writer API: implemented for sync `Write`
+- No full-file buffering: implemented for CLI schema encode/decode path
+- All codecs support streaming mode: implemented for current schema JSONL
+  column-block path only
 - Benchmarks are reproducible
 
 ## v0.3 - Advanced Column Compression

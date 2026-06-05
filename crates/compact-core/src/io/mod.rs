@@ -33,8 +33,32 @@ pub struct ColumnInspect {
     pub payload_len: usize,
 }
 
+/// Encoded JSONL row group before it is placed in a streaming v0.2 block.
+///
+/// A row group is the unit v0.2 will flush independently. It contains only the
+/// column-block payload, not the outer file/block envelope. Keeping this type
+/// separate lets the existing v0.1 one-shot encoder and the upcoming streaming
+/// writer share the same columnar encoding logic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JsonlRowGroup {
+    pub row_count: usize,
+    pub raw_bytes: usize,
+    pub payload: Vec<u8>,
+}
+
 /// Encode JSONL rows using required schema columns.
 pub fn encode_jsonl(input: &str, schema: &Schema) -> Result<Vec<u8>> {
+    let row_group = encode_jsonl_row_group(input, schema)?;
+
+    Ok(framing::encode_v1(Codec::ColumnBlock, &row_group.payload))
+}
+
+/// Encode a bounded JSONL row group into the current column-block payload.
+///
+/// This is the extraction point for v0.2 streaming. The caller owns deciding
+/// how many rows/bytes belong in the group; this function only validates those
+/// rows against the schema and emits one independently decodable column block.
+pub(crate) fn encode_jsonl_row_group(input: &str, schema: &Schema) -> Result<JsonlRowGroup> {
     let columns = schema.supported_columns()?;
     let mut column_values = columns
         .iter()
@@ -66,7 +90,11 @@ pub fn encode_jsonl(input: &str, schema: &Schema) -> Result<Vec<u8>> {
         write_column_block(&mut blocks, column, row_count, &payload)?;
     }
 
-    Ok(framing::encode_v1(Codec::ColumnBlock, &blocks))
+    Ok(JsonlRowGroup {
+        row_count,
+        raw_bytes: input.len(),
+        payload: blocks,
+    })
 }
 
 /// Decode a column-block JSONL frame back into compact one-object-per-line JSONL.
@@ -607,7 +635,7 @@ fn render_json_object(columns: &[DecodedColumn], row_index: usize) -> Result<Str
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_jsonl, encode_jsonl};
+    use super::{decode_jsonl, encode_jsonl, encode_jsonl_row_group};
     use crate::CompactError;
     use crate::schema::Schema;
 
@@ -663,6 +691,25 @@ columns:
         let decoded = decode_jsonl(&encoded, &single_column_schema()).unwrap();
 
         assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn jsonl_row_group_exposes_streaming_block_inputs() {
+        let input = "{\"ts\":100}\n{\"ts\":101}\n";
+        let row_group = encode_jsonl_row_group(input, &single_column_schema()).unwrap();
+
+        assert_eq!(row_group.row_count, 2);
+        assert_eq!(row_group.raw_bytes, input.len());
+        assert!(!row_group.payload.is_empty());
+    }
+
+    #[test]
+    fn jsonl_empty_row_group_has_column_metadata_without_rows() {
+        let row_group = encode_jsonl_row_group("", &single_column_schema()).unwrap();
+
+        assert_eq!(row_group.row_count, 0);
+        assert_eq!(row_group.raw_bytes, 0);
+        assert!(!row_group.payload.is_empty());
     }
 
     #[test]

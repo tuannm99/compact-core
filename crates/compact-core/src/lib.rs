@@ -8,10 +8,13 @@ pub mod io;
 pub mod pipeline;
 pub mod primitives;
 pub mod schema;
+pub mod streaming;
 mod transforms;
 
 pub const MAGIC_V1: [u8; 4] = *b"CMP1";
 pub const VERSION_V1: u8 = 1;
+pub const MAGIC_V2: [u8; 4] = *b"CMP2";
+pub const VERSION_V2: u8 = 2;
 
 pub type Result<T> = std::result::Result<T, CompactError>;
 

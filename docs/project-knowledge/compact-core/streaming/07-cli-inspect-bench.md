@@ -2,7 +2,7 @@
 
 ## CLI Streaming Behavior
 
-Current CLI behavior:
+Old CLI behavior:
 
 ```rust
 fs::read_to_string(input)
@@ -10,23 +10,23 @@ compact_core::io::encode_jsonl(&input_text, &schema)
 fs::write(output, encoded)
 ```
 
-v0.2 CLI should become:
+Current v0.2 CLI behavior:
 
 ```rust
 let input = BufReader::new(File::open(input_path)?);
-let output = BufWriter::new(File::create(output_path)?);
-compact_core::io::encode_jsonl_stream(input, output, schema, options)?;
+let output = File::create(output_path)?;
+compact_core::streaming::encode_jsonl_stream(input, output, schema, options)?;
 ```
 
 Decode:
 
 ```rust
-let input = BufReader::new(File::open(input_path)?);
-let output = BufWriter::new(File::create(output_path)?);
-compact_core::io::decode_jsonl_stream(input, output, schema)?;
+let input = File::open(input_path)?;
+let output = File::create(output_path)?;
+compact_core::streaming::decode_jsonl_stream(input, output, schema)?;
 ```
 
-The CLI should expose block size:
+The CLI exposes block size:
 
 ```text
 compact encode input.jsonl output.cmp --schema schema.yml --block-rows 10000
@@ -39,6 +39,7 @@ compact encode input.jsonl output.cmp --schema schema.yml --block-bytes 8388608
 
 ```text
 version: 2
+format: stream
 blocks: 42
 total_rows: 420000
 total_raw_bytes: ...
@@ -50,6 +51,22 @@ block 1 rows=10000 raw=... compressed=... status=ok
 block 2 rows=10000 raw=... compressed=... status=checksum_mismatch
 ```
 
+Current implementation shows block-level metadata and validates frame checksums:
+
+```text
+version: 2
+format: stream
+blocks: 2
+total_rows: 3
+total_raw_bytes: 78
+total_compressed_bytes: 263
+input_bytes: 78
+output_bytes: 263
+compression_ratio: 3.3718
+block 0 offset=10 rows=2 raw=52 compressed=137 checksum=...
+block 1 offset=147 rows=1 raw=26 compressed=126 checksum=...
+```
+
 For columns:
 
 ```text
@@ -57,9 +74,10 @@ column ts codec=DeltaVarintU64 rows=10000 payload_len=...
 column level codec=Dictionary rows=10000 dictionary_size=...
 ```
 
-Inspect should not fully decode all values unless requested.
+Inspect does not fully decode values.
 
-It should read metadata and checksums.
+It reads block metadata and verifies frame checksums. Column-level stream
+metadata is still pending.
 
 ## Benchmarks for v0.2
 
