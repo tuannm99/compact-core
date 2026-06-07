@@ -368,7 +368,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::JsonlBlockReader;
-    use crate::streaming::{BlockOptions, JsonlBlockWriter};
+    use crate::streaming::{BlockOptions, JsonlBlockWriter, inspect_stream};
     use crate::{CompactError, MAGIC_V2, VERSION_V2};
 
     fn schema() -> crate::schema::Schema {
@@ -391,6 +391,19 @@ columns:
         }
 
         writer.finish().unwrap()
+    }
+
+    fn corrupt_second_block(mut data: Vec<u8>) -> Vec<u8> {
+        let inspect = inspect_stream(Cursor::new(&data)).unwrap();
+        let second = inspect
+            .blocks
+            .get(1)
+            .expect("fixture should have two blocks");
+        let corrupt_at = second.encoded_offset as usize + second.compressed_size as usize - 1;
+
+        data[corrupt_at] ^= 0xff;
+
+        data
     }
 
     #[test]
@@ -488,6 +501,28 @@ columns:
         let mut reader = JsonlBlockReader::new(Cursor::new(data), schema()).unwrap();
         let err = reader.next_block().unwrap_err();
 
+        assert!(matches!(
+            err,
+            CompactError::InvalidInput("frame checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn reader_isolates_corruption_to_later_block() {
+        let data = encode_stream(
+            &["{\"ts\":100}", "{\"ts\":101}", "{\"ts\":102}"],
+            BlockOptions {
+                max_rows_per_block: 2,
+                max_uncompressed_bytes_per_block: 1024,
+            },
+        );
+        let data = corrupt_second_block(data);
+        let mut reader = JsonlBlockReader::new(Cursor::new(data), schema()).unwrap();
+        let first = reader.next_block().unwrap().unwrap();
+        let err = reader.next_block().unwrap_err();
+
+        assert_eq!(first.metadata.block_index, 0);
+        assert_eq!(first.jsonl, "{\"ts\":100}\n{\"ts\":101}\n");
         assert!(matches!(
             err,
             CompactError::InvalidInput("frame checksum mismatch")

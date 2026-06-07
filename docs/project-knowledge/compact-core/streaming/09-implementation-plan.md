@@ -15,14 +15,18 @@ Phase 1 is implemented:
 - CLI schema encode/decode uses streaming helpers.
 - CLI schema encode supports `--block-rows` and `--block-bytes`.
 - `compact inspect` understands `CMP2` and shows block metadata.
+- CLI integration tests cover streaming encode/decode, inspect, bench, block
+  sizing, and invalid block options.
+- `compact bench` uses streaming encode/decode and reports throughput metrics.
+- Generated 10,000-row CLI validation covers multi-block roundtrip and inspect.
+- Corruption isolation tests cover later-block checksum failure while preserving
+  earlier block decode.
 
 Still pending for v0.2 release:
 
-- Streaming benchmark command.
-- Large generated JSONL validation.
-- Persisted footer index decision.
 - Optional column metadata in stream inspect.
-- CLI integration tests around encode/decode/inspect.
+- Manual 10 GB scale validation.
+- Persisted footer index decision.
 
 Recommended order:
 
@@ -60,7 +64,9 @@ struct RowGroupBuffer {
 
 9. Add inspect block metadata. Done for `CMP2` scan-time metadata.
 
-10. Add benchmarks and large generated test. Pending.
+10. Add benchmarks and large generated test. Done for streaming benchmark and
+    10,000-row generated CLI validation. Manual 10 GB validation is still
+    pending before release.
 
 Do not start with async.
 

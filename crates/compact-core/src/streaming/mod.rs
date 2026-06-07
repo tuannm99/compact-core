@@ -171,4 +171,36 @@ columns:
         assert_eq!(inspect.total_uncompressed_size, input.len() as u64);
         assert!(inspect.total_compressed_size > 0);
     }
+
+    #[test]
+    fn decode_stream_stops_on_corrupted_later_block() {
+        let input = "{\"ts\":100,\"level\":\"INFO\"}\n{\"ts\":101,\"level\":\"WARN\"}\n{\"ts\":102,\"level\":\"INFO\"}\n";
+        let mut encoded = encode_jsonl_stream(
+            Cursor::new(input),
+            Vec::new(),
+            schema(),
+            BlockOptions {
+                max_rows_per_block: 2,
+                max_uncompressed_bytes_per_block: 1024,
+            },
+        )
+        .unwrap();
+        let inspect = inspect_stream(Cursor::new(&encoded)).unwrap();
+        let second = &inspect.blocks[1];
+        let corrupt_at = second.encoded_offset as usize + second.compressed_size as usize - 1;
+
+        encoded[corrupt_at] ^= 0xff;
+
+        let mut output = Vec::new();
+        let err = decode_jsonl_stream(Cursor::new(encoded), &mut output, schema()).unwrap_err();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "{\"ts\":100,\"level\":\"INFO\"}\n{\"ts\":101,\"level\":\"WARN\"}\n"
+        );
+        assert!(matches!(
+            err,
+            crate::CompactError::InvalidInput("frame checksum mismatch")
+        ));
+    }
 }
