@@ -41,6 +41,9 @@
 
 ## v0.2 - Streaming Block Engine
 
+Status: implemented for schema-backed JSONL streaming. See [v0.2.md](v0.2.md)
+for release notes, supported behavior, and remaining limitations.
+
 ### Scope
 
 - Bounded memory
@@ -49,28 +52,30 @@
 
 ### Features
 
-- Streaming writer
-- Streaming reader
-- Configurable block size
-- Incremental flush
-- Partial decode
-- Row iterator
-- Column chunk metadata
+- Streaming writer: implemented
+- Streaming reader: implemented
+- Configurable block size: implemented with `--block-rows` and `--block-bytes`
+- Incremental flush: implemented
+- Partial decode: implemented at block boundaries
+- Row iterator: deferred
+- Column chunk metadata: deferred beyond current column-block metadata
 
 ### Definition of Done
 
-- Encode/decode a 10 GB file without OOM
-- Memory stays under a configurable limit
-- Streaming decode supports sequential scan
-- Partial block corruption is isolated
-- Block index implemented
-- `compact inspect` shows block metadata
-- Throughput benchmark included
-- Decode throughput is higher than encode throughput
-- Backpressure-safe writer API
-- No full-file buffering
-- All codecs support streaming mode
-- Benchmarks are reproducible
+- Encode/decode a 10 GB file without OOM: pending manual validation
+- Memory stays under a configurable limit: implemented by block options,
+  pending manual measurement at 10 GB scale
+- Streaming decode supports sequential scan: implemented
+- Partial block corruption is isolated: implemented
+- Block index implemented: persisted `IDX1` footer index
+- `compact inspect` shows block metadata: implemented
+- Throughput benchmark included: implemented
+- Decode throughput is higher than encode throughput: measured by benchmark,
+  dataset-dependent
+- Backpressure-safe writer API: implemented for sync `Write`
+- No full-file buffering: implemented for CLI schema encode/decode
+- All codecs support streaming mode: implemented for current schema JSONL codecs
+- Benchmarks are reproducible: implemented with explicit block size flags
 
 ## v0.3 - Advanced Column Compression
 

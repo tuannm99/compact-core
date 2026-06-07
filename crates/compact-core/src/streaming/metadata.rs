@@ -1,8 +1,8 @@
 /// Metadata for one independently decodable streaming block.
 ///
-/// v0.2 writes blocks sequentially first. A future footer index can store a
-/// list of these records for random access, but the fields are useful
-/// immediately for `inspect`, corruption reporting, and throughput benchmarks.
+/// v0.2 writes one record per block into the persisted `IDX1` footer index.
+/// The same fields are also produced while scanning blocks for `inspect`,
+/// corruption reporting, and throughput benchmarks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockMetadata {
     /// Zero-based block number in physical file order.

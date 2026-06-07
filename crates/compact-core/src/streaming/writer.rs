@@ -143,9 +143,9 @@ impl<W: Write> JsonlBlockWriter<W> {
 
     /// Metadata for blocks written so far.
     ///
-    /// This is an in-memory inline index useful for tests and future `inspect`.
-    /// The first v0.2 writer does not persist a footer index yet because that
-    /// would require additional seek/footer design.
+    /// This is the same metadata written into the `IDX1` footer when
+    /// `finish` succeeds. Exposing it before finish is useful for tests and for
+    /// callers that want progress information while writing.
     pub fn metadata(&self) -> &[BlockMetadata] {
         &self.metadata
     }

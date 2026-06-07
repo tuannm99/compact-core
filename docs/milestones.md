@@ -63,10 +63,10 @@ Build the first end-to-end offline compression pipeline for JSONL data.
 
 ## v0.2 - Streaming Block Engine
 
-Status: phase 1 implemented. The sequential `CMP2` block stream can encode,
-decode, and inspect schema-based JSONL without full-file buffering in the CLI.
-The remaining v0.2 work is release documentation and optional manual 10 GB
-scale validation.
+Status: release hardening. The sequential `CMP2` block stream can encode,
+decode, inspect, and benchmark schema-based JSONL without full-file buffering in
+the CLI. Release notes are documented in [v0.2.md](v0.2.md). The remaining
+release task is optional manual 10 GB scale validation.
 
 ### Goal
 
