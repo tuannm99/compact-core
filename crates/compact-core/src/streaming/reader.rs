@@ -9,12 +9,14 @@ use std::io::{ErrorKind, Read};
 use crate::io::decode_jsonl;
 use crate::primitives::crc32;
 use crate::schema::Schema;
-use crate::streaming::{BLOCK_MAGIC_V1, BlockMetadata};
+use crate::streaming::{BLOCK_MAGIC_V1, BlockMetadata, INDEX_MAGIC_V1};
 use crate::{Codec, CompactError, MAGIC_V1, MAGIC_V2, Result, VERSION_V2, framing};
 
 const STREAM_HEADER_LEN: usize = 4 + 1 + 1 + 4;
 const FRAME_HEADER_LEN: usize = 4 + 1 + 1 + 8 + 4;
 const FRAME_PAYLOAD_LEN_OFFSET: usize = 4 + 1 + 1;
+const INDEX_COUNT_LEN: usize = 8;
+const INDEX_ENTRY_LEN: usize = 8 + 8 + 8 + 8 + 8 + 4;
 
 /// One decoded JSONL block from a v0.2 stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +30,7 @@ pub struct DecodedBlock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamInspect {
     pub blocks: Vec<BlockMetadata>,
+    pub footer_index: Option<Vec<BlockMetadata>>,
     pub total_rows: u64,
     pub total_uncompressed_size: u64,
     pub total_compressed_size: u64,
@@ -124,7 +127,10 @@ impl<R: Read> JsonlBlockReader<R> {
     }
 
     fn read_next_frame(&mut self) -> Result<Option<Vec<u8>>> {
-        read_next_frame_from(&mut self.reader)
+        match read_next_record_from(&mut self.reader)? {
+            StreamRecord::Frame(frame) => Ok(Some(frame)),
+            StreamRecord::Index(_) | StreamRecord::Eof => Ok(None),
+        }
     }
 }
 
@@ -133,11 +139,20 @@ pub fn inspect_jsonl_stream<R: Read>(mut reader: R) -> Result<StreamInspect> {
     validate_stream_header(&mut reader)?;
 
     let mut blocks = Vec::new();
+    let mut footer_index = None;
     let mut next_offset = STREAM_HEADER_LEN as u64;
     let mut expected_block_index = 0u64;
     let mut expected_first_row_index = 0u64;
 
-    while let Some(frame) = read_next_frame_from(&mut reader)? {
+    loop {
+        let frame = match read_next_record_from(&mut reader)? {
+            StreamRecord::Frame(frame) => frame,
+            StreamRecord::Index(index) => {
+                footer_index = Some(index);
+                break;
+            }
+            StreamRecord::Eof => break,
+        };
         let frame_len = frame.len();
         let decoded = framing::decode_v1(&frame)?;
         if decoded.codec != Codec::ColumnBlock {
@@ -178,8 +193,15 @@ pub fn inspect_jsonl_stream<R: Read>(mut reader: R) -> Result<StreamInspect> {
     let total_uncompressed_size = blocks.iter().map(|block| block.uncompressed_size).sum();
     let total_compressed_size = blocks.iter().map(|block| block.compressed_size).sum();
 
+    if footer_index.as_ref().is_some_and(|index| index != &blocks) {
+        return Err(CompactError::InvalidInput(
+            "footer index does not match scanned blocks",
+        ));
+    }
+
     Ok(StreamInspect {
         blocks,
+        footer_index,
         total_rows,
         total_uncompressed_size,
         total_compressed_size,
@@ -214,20 +236,28 @@ fn validate_stream_header<R: Read>(reader: &mut R) -> Result<()> {
     Ok(())
 }
 
-fn read_next_frame_from<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>> {
-    let mut header = [0u8; FRAME_HEADER_LEN];
-    match reader.read(&mut header[0..1]) {
-        Ok(0) => return Ok(None),
-        Ok(1) => {}
-        Ok(_) => unreachable!("one-byte read cannot return more than one byte"),
-        Err(err) => return Err(CompactError::Io(err)),
+enum StreamRecord {
+    Frame(Vec<u8>),
+    Index(Vec<BlockMetadata>),
+    Eof,
+}
+
+fn read_next_record_from<R: Read>(reader: &mut R) -> Result<StreamRecord> {
+    let Some(magic) = read_next_magic(reader)? else {
+        return Ok(StreamRecord::Eof);
+    };
+
+    if magic == INDEX_MAGIC_V1 {
+        return read_index_footer_after_magic(reader).map(StreamRecord::Index);
     }
 
-    read_exact_invalid(reader, &mut header[1..], "frame header is truncated")?;
-
-    if header[0..4] != MAGIC_V1 {
+    if magic != MAGIC_V1 {
         return Err(CompactError::InvalidInput("invalid frame magic"));
     }
+
+    let mut header = [0u8; FRAME_HEADER_LEN];
+    header[0..4].copy_from_slice(&magic);
+    read_exact_invalid(reader, &mut header[4..], "frame header is truncated")?;
 
     let payload_len_start = FRAME_PAYLOAD_LEN_OFFSET;
     let payload_len_end = payload_len_start + 8;
@@ -248,7 +278,59 @@ fn read_next_frame_from<R: Read>(reader: &mut R) -> Result<Option<Vec<u8>>> {
         "frame payload is truncated",
     )?;
 
-    Ok(Some(frame))
+    Ok(StreamRecord::Frame(frame))
+}
+
+fn read_next_magic<R: Read>(reader: &mut R) -> Result<Option<[u8; 4]>> {
+    let mut magic = [0u8; 4];
+    match reader.read(&mut magic[0..1]) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!("one-byte read cannot return more than one byte"),
+        Err(err) => return Err(CompactError::Io(err)),
+    }
+
+    read_exact_invalid(
+        reader,
+        &mut magic[1..],
+        "frame or index header is truncated",
+    )?;
+
+    Ok(Some(magic))
+}
+
+fn read_index_footer_after_magic<R: Read>(reader: &mut R) -> Result<Vec<BlockMetadata>> {
+    let mut count_bytes = [0u8; INDEX_COUNT_LEN];
+    read_exact_invalid(reader, &mut count_bytes, "index block count is truncated")?;
+    let block_count = u64_to_usize(
+        u64::from_le_bytes(count_bytes),
+        "index block count is too large",
+    )?;
+    let mut blocks = Vec::with_capacity(block_count);
+
+    for expected_index in 0..block_count {
+        let mut entry = [0u8; INDEX_ENTRY_LEN];
+        let mut cursor = 0usize;
+        read_exact_invalid(reader, &mut entry, "index entry is truncated")?;
+
+        let block_index = read_u64(&entry, &mut cursor, "index block index is truncated")?;
+        if block_index != expected_index as u64 {
+            return Err(CompactError::InvalidInput(
+                "index block index is not sequential",
+            ));
+        }
+
+        blocks.push(BlockMetadata {
+            block_index,
+            encoded_offset: read_u64(&entry, &mut cursor, "index block offset is truncated")?,
+            row_count: read_u64(&entry, &mut cursor, "index row count is truncated")?,
+            uncompressed_size: read_u64(&entry, &mut cursor, "index raw size is truncated")?,
+            compressed_size: read_u64(&entry, &mut cursor, "index compressed size is truncated")?,
+            checksum: read_u32(&entry, &mut cursor, "index checksum is truncated")?,
+        });
+    }
+
+    Ok(blocks)
 }
 
 struct ParsedBlockPayload<'a> {
@@ -348,6 +430,16 @@ fn read_u64(data: &[u8], cursor: &mut usize, err: &'static str) -> Result<u64> {
         bytes
             .try_into()
             .expect("read_slice returned exactly eight bytes"),
+    ))
+}
+
+fn read_u32(data: &[u8], cursor: &mut usize, err: &'static str) -> Result<u32> {
+    let bytes = read_slice(data, cursor, 4, err)?;
+
+    Ok(u32::from_le_bytes(
+        bytes
+            .try_into()
+            .expect("read_slice returned exactly four bytes"),
     ))
 }
 
@@ -483,7 +575,11 @@ columns:
     #[test]
     fn reader_rejects_truncated_frame_payload() {
         let mut data = encode_stream(&["{\"ts\":100}"], BlockOptions::default());
-        data.pop();
+        let inspect = inspect_stream(Cursor::new(&data)).unwrap();
+        let first = &inspect.blocks[0];
+
+        data.truncate(first.encoded_offset as usize + first.compressed_size as usize - 1);
+
         let mut reader = JsonlBlockReader::new(Cursor::new(data), schema()).unwrap();
         let err = reader.next_block().unwrap_err();
 
@@ -496,8 +592,12 @@ columns:
     #[test]
     fn reader_rejects_corrupted_block_checksum() {
         let mut data = encode_stream(&["{\"ts\":100}"], BlockOptions::default());
-        let last = data.len() - 1;
-        data[last] ^= 0xff;
+        let inspect = inspect_stream(Cursor::new(&data)).unwrap();
+        let first = &inspect.blocks[0];
+        let corrupt_at = first.encoded_offset as usize + first.compressed_size as usize - 1;
+
+        data[corrupt_at] ^= 0xff;
+
         let mut reader = JsonlBlockReader::new(Cursor::new(data), schema()).unwrap();
         let err = reader.next_block().unwrap_err();
 
@@ -526,6 +626,27 @@ columns:
         assert!(matches!(
             err,
             CompactError::InvalidInput("frame checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn inspect_rejects_footer_index_mismatch() {
+        let mut data = encode_stream(
+            &["{\"ts\":100}", "{\"ts\":101}", "{\"ts\":102}"],
+            BlockOptions {
+                max_rows_per_block: 2,
+                max_uncompressed_bytes_per_block: 1024,
+            },
+        );
+        let last = data.len() - 1;
+
+        data[last] ^= 0xff;
+
+        let err = inspect_stream(Cursor::new(data)).unwrap_err();
+
+        assert!(matches!(
+            err,
+            CompactError::InvalidInput("footer index does not match scanned blocks")
         ));
     }
 }

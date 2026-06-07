@@ -170,6 +170,8 @@ fn inspect_reports_streaming_block_metadata() {
     assert!(stdout.contains("version: 2"));
     assert!(stdout.contains("format: stream"));
     assert!(stdout.contains("blocks: 2"));
+    assert!(stdout.contains("index: footer"));
+    assert!(stdout.contains("index_blocks: 2"));
     assert!(stdout.contains("total_rows: 3"));
     assert!(stdout.contains("block 0 offset=10 rows=2"));
     assert!(stdout.contains("block 1 offset="));

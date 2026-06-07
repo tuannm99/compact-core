@@ -21,12 +21,13 @@ Phase 1 is implemented:
 - Generated 10,000-row CLI validation covers multi-block roundtrip and inspect.
 - Corruption isolation tests cover later-block checksum failure while preserving
   earlier block decode.
+- Persisted sequential `IDX1` footer index is written after block frames and
+  reported by inspect.
 
 Still pending for v0.2 release:
 
 - Optional column metadata in stream inspect.
 - Manual 10 GB scale validation.
-- Persisted footer index decision.
 
 Recommended order:
 
@@ -95,7 +96,7 @@ Recommended answers for first v0.2 implementation:
 ```text
 magic: CMP2
 schema: external for now
-index: collect inline scan metadata first, footer later
+index: persisted sequential IDX1 footer, plus scan-time validation
 blocks: independently decodable
 dictionary: reset per block
 decode corruption: stop by default

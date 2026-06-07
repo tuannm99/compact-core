@@ -17,6 +17,8 @@ Required tests:
 - Full streaming decode stops at the first corrupted later block. Done in core
   tests; callers may already have received bytes from earlier valid blocks.
 - Inspect shows block metadata. Done in core and CLI tests.
+- Persisted footer index is written and visible in inspect. Done in core and CLI
+  tests.
 - Decode does not buffer all blocks.
 - Generated 10,000-row JSONL roundtrip across 10 blocks. Done in CLI tests.
 

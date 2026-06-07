@@ -27,6 +27,9 @@ pub use writer::JsonlBlockWriter;
 /// Magic for a v0.2 block payload inside a framed stream.
 pub(crate) const BLOCK_MAGIC_V1: [u8; 4] = *b"BLK1";
 
+/// Magic for the persisted v0.2 footer index.
+pub(crate) const INDEX_MAGIC_V1: [u8; 4] = *b"IDX1";
+
 /// Encode JSONL from a buffered reader into a v0.2 block stream.
 ///
 /// This is the high-level API most callers should use. It reads one JSONL line
@@ -167,6 +170,7 @@ columns:
         let inspect = inspect_stream(Cursor::new(encoded)).unwrap();
 
         assert_eq!(inspect.blocks.len(), 2);
+        assert_eq!(inspect.footer_index.as_ref().map(Vec::len), Some(2));
         assert_eq!(inspect.total_rows, 3);
         assert_eq!(inspect.total_uncompressed_size, input.len() as u64);
         assert!(inspect.total_compressed_size > 0);

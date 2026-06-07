@@ -132,6 +132,45 @@ This gives:
 - row count for decode validation
 - block index for sequential scan
 
+## v0.2 Footer Index
+
+Current v0.2 uses a persisted footer index after all block frames:
+
+```text
+[file header]
+[block frame 0]
+[block frame 1]
+[block frame 2]
+[index footer]
+```
+
+Footer layout:
+
+```text
+index_magic       4 bytes  "IDX1"
+block_count       u64
+entries           repeated block_count times
+```
+
+Each index entry:
+
+```text
+block_index       u64
+encoded_offset    u64
+row_count         u64
+raw_size          u64
+compressed_size   u64
+checksum          u32
+```
+
+The footer is written sequentially, so the writer does not need `Seek`. Decode
+still reads blocks in order and stops cleanly when it reaches `IDX1`. Inspect
+scans block frames, validates the footer structure, and reports whether the
+stream has a footer index.
+
+This is not a random-access footer pointer yet. Fast seek-to-index is deferred
+until the queryable storage phases need it.
+
 ## Column Chunk Metadata
 
 Column chunk metadata describes each column inside a block.

@@ -65,8 +65,8 @@ Build the first end-to-end offline compression pipeline for JSONL data.
 
 Status: phase 1 implemented. The sequential `CMP2` block stream can encode,
 decode, and inspect schema-based JSONL without full-file buffering in the CLI.
-The remaining v0.2 work is deciding whether the release needs a persisted
-footer index or scan-only block indexing, then preparing release docs.
+The remaining v0.2 work is release documentation and optional manual 10 GB
+scale validation.
 
 ### Goal
 
@@ -98,8 +98,7 @@ Support large files with bounded memory and streaming encode/decode flows.
 - Streaming decode supports sequential scan: implemented
 - Partial block corruption is isolated: implemented at frame/block checksum
   boundary for sequential decode
-- Block index implemented: partially implemented by scan-time inline metadata;
-  persisted footer index is pending decision
+- Block index implemented: persisted sequential `IDX1` footer index
 - `compact inspect` shows block metadata: implemented for `CMP2`
 - Throughput benchmark included: implemented in `compact bench`
 - Decode throughput is higher than encode throughput

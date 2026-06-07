@@ -57,6 +57,8 @@ Current implementation shows block-level metadata and validates frame checksums:
 version: 2
 format: stream
 blocks: 2
+index: footer
+index_blocks: 2
 total_rows: 3
 total_raw_bytes: 78
 total_compressed_bytes: 263

@@ -9,7 +9,7 @@ use std::io::Write;
 use crate::io::encode_jsonl_row_group;
 use crate::primitives::crc32;
 use crate::schema::Schema;
-use crate::streaming::{BLOCK_MAGIC_V1, BlockMetadata, BlockOptions};
+use crate::streaming::{BLOCK_MAGIC_V1, BlockMetadata, BlockOptions, INDEX_MAGIC_V1};
 use crate::{Codec, CompactError, MAGIC_V2, Result, VERSION_V2, framing};
 
 const STREAM_FLAGS: u8 = 0;
@@ -136,6 +136,7 @@ impl<W: Write> JsonlBlockWriter<W> {
     /// successfully.
     pub fn finish(mut self) -> Result<W> {
         self.flush_block()?;
+        write_index_footer(&mut self.writer, &self.metadata)?;
 
         Ok(self.writer)
     }
@@ -237,10 +238,27 @@ fn usize_to_u64(value: usize, err: &'static str) -> Result<u64> {
     u64::try_from(value).map_err(|_| CompactError::InvalidInput(err))
 }
 
+fn write_index_footer<W: Write>(writer: &mut W, metadata: &[BlockMetadata]) -> Result<()> {
+    let block_count = usize_to_u64(metadata.len(), "block index has too many blocks")?;
+
+    writer.write_all(&INDEX_MAGIC_V1)?;
+    writer.write_all(&block_count.to_le_bytes())?;
+    for block in metadata {
+        writer.write_all(&block.block_index.to_le_bytes())?;
+        writer.write_all(&block.encoded_offset.to_le_bytes())?;
+        writer.write_all(&block.row_count.to_le_bytes())?;
+        writer.write_all(&block.uncompressed_size.to_le_bytes())?;
+        writer.write_all(&block.compressed_size.to_le_bytes())?;
+        writer.write_all(&block.checksum.to_le_bytes())?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{JsonlBlockWriter, normalize_jsonl_line};
-    use crate::streaming::BlockOptions;
+    use crate::streaming::{BlockOptions, INDEX_MAGIC_V1};
     use crate::{CompactError, MAGIC_V2, VERSION_V2};
 
     fn schema() -> crate::schema::Schema {
@@ -262,7 +280,8 @@ columns:
 
         assert_eq!(&output[0..4], &MAGIC_V2);
         assert_eq!(output[4], VERSION_V2);
-        assert_eq!(output.len(), 10);
+        assert_eq!(&output[10..14], &INDEX_MAGIC_V1);
+        assert_eq!(output.len(), 22);
     }
 
     #[test]

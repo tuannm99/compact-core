@@ -206,6 +206,12 @@ fn inspect_stream_file(data: &[u8]) -> Result<()> {
     println!("version: {}", compact_core::VERSION_V2);
     println!("format: stream");
     println!("blocks: {}", inspect.blocks.len());
+    if let Some(index) = &inspect.footer_index {
+        println!("index: footer");
+        println!("index_blocks: {}", index.len());
+    } else {
+        println!("index: scan");
+    }
     println!("total_rows: {}", inspect.total_rows);
     println!("total_raw_bytes: {}", inspect.total_uncompressed_size);
     println!("total_compressed_bytes: {}", inspect.total_compressed_size);
