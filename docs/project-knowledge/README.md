@@ -24,6 +24,7 @@ How those concepts are applied in this project:
 - [v0.2 streaming index](compact-core/03-v0.2-streaming-index.md)
 - [Rules and reminders](compact-core/04-rules-and-reminders.md)
 - [v0.2 streaming detail](compact-core/streaming/README.md)
+- [v0.3 advanced column compression](compact-core/v0.3/README.md)
 
 Use the concept files to learn the underlying ideas. Use the `compact-core`
 files when deciding what to build in this repository.

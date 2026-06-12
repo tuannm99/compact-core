@@ -167,7 +167,7 @@ fn write_column_block(
 
     out.extend_from_slice(&name_len.to_le_bytes());
     out.extend_from_slice(name);
-    out.push(codec_to_id(column.codec));
+    out.push(codec_to_id(column.codec)?);
     out.extend_from_slice(&row_count.to_le_bytes());
     out.extend_from_slice(&payload_len.to_le_bytes());
     out.extend_from_slice(payload);
@@ -218,7 +218,7 @@ fn decode_column_blocks(
         }
 
         let codec_id = read_u8(data, &mut cursor, "column codec is truncated")?;
-        if codec_id != codec_to_id(expected_column.codec) {
+        if codec_id != codec_to_id(expected_column.codec)? {
             return Err(CompactError::InvalidInput(
                 "column codec does not match schema",
             ));
@@ -335,11 +335,12 @@ fn inspect_column_blocks(data: &[u8]) -> Result<Vec<ColumnInspect>> {
     Ok(columns)
 }
 
-fn codec_to_id(codec: crate::schema::SchemaCodec) -> u8 {
+fn codec_to_id(codec: crate::schema::SchemaCodec) -> Result<u8> {
     match codec {
-        crate::schema::SchemaCodec::Dictionary => 0x05,
-        crate::schema::SchemaCodec::DeltaVarintU64 => 0x02,
-        crate::schema::SchemaCodec::Rle => 0x01,
+        crate::schema::SchemaCodec::Dictionary => Ok(0x05),
+        crate::schema::SchemaCodec::DeltaVarintU64 => Ok(0x02),
+        crate::schema::SchemaCodec::Rle => Ok(0x01),
+        _ => Err(CompactError::Unsupported("v0.2 column codec")),
     }
 }
 

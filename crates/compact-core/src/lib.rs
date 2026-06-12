@@ -3,6 +3,7 @@ use std::io as std_io;
 use thiserror::Error;
 
 pub mod codecs;
+pub mod format_v3;
 pub mod framing;
 pub mod io;
 pub mod pipeline;
@@ -15,6 +16,8 @@ pub const MAGIC_V1: [u8; 4] = *b"CMP1";
 pub const VERSION_V1: u8 = 1;
 pub const MAGIC_V2: [u8; 4] = *b"CMP2";
 pub const VERSION_V2: u8 = 2;
+pub const MAGIC_V3: [u8; 4] = *b"CMP3";
+pub const VERSION_V3: u8 = 3;
 
 pub type Result<T> = std::result::Result<T, CompactError>;
 
@@ -138,8 +141,9 @@ fn ensure_frame_codec(config: &EncodeConfig, actual: Codec) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Codec, CompactError, EncodeConfig, MAGIC_V1, Transform, VERSION_V1, ValueType, checksum32,
-        crate_version, decode_bytes_frame, decode_u64_frame, encode_bytes_frame, encode_u64_frame,
+        Codec, CompactError, EncodeConfig, MAGIC_V1, MAGIC_V3, Transform, VERSION_V1, VERSION_V3,
+        ValueType, checksum32, crate_version, decode_bytes_frame, decode_u64_frame,
+        encode_bytes_frame, encode_u64_frame,
     };
 
     #[test]
@@ -151,6 +155,12 @@ mod tests {
     fn frame_constants_match_v1() {
         assert_eq!(MAGIC_V1, *b"CMP1");
         assert_eq!(VERSION_V1, 1);
+    }
+
+    #[test]
+    fn format_constants_match_v3() {
+        assert_eq!(MAGIC_V3, *b"CMP3");
+        assert_eq!(VERSION_V3, 3);
     }
 
     #[test]
