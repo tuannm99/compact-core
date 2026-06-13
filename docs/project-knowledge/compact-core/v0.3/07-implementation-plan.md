@@ -2,7 +2,7 @@
 
 ## Phase 1: Format and Schema
 
-Status: implemented, pending commit.
+Status: implemented and committed.
 
 - Add `CMP3` and version constants. Done.
 - Define versioned column chunk metadata. Done.
@@ -16,6 +16,8 @@ Exit criteria:
 - Existing `CMP2` behavior is unchanged. Done through existing regression tests.
 
 ## Phase 2: Numeric Bit Packing
+
+Status: not started.
 
 - Integrate the existing bitpack primitive into numeric columns.
 - Persist bit width.
@@ -31,16 +33,21 @@ Exit criteria:
 
 ## Phase 3: Boolean and Nullability
 
-- Add boolean schema type.
-- Add value bitmap.
-- Add validity bitmap shared by nullable types.
-- Define missing nullable field behavior.
-- Add null-count metadata.
+Status: implemented, pending commit.
+
+- Add boolean schema type. Done in Phase 1.
+- Add value bitmap. Done.
+- Add validity bitmap shared by nullable types. Done.
+- Define missing nullable field behavior. Done: missing nullable field is null.
+- Add null-count metadata. Done.
+- Add one-shot CMP3 boolean JSONL integration with row-group checksum. Done.
 
 Exit criteria:
 
-- Required and nullable semantics are fully tested.
-- All-null and mixed-null columns roundtrip.
+- Required and nullable semantics are fully tested. Done.
+- All-null and mixed-null columns roundtrip. Done.
+- Multiple boolean columns roundtrip through a CMP3 file. Done.
+- Corrupted and truncated row groups fail safely. Done.
 
 ## Phase 4: Column Statistics
 

@@ -48,6 +48,25 @@ checksum
 
 Each row group remains independently checksummed.
 
+Phase 3 implements the first concrete row-group body in
+`crates/compact-core/src/io/v3.rs`:
+
+```text
+magic             4 bytes  "RGB3"
+block_index       u64      zero for the one-shot writer
+first_row_index   u64      zero for the one-shot writer
+row_count         u64
+raw_jsonl_size    u64
+column_count      u32
+columns           repeated metadata-length, metadata, payload
+checksum          u32 CRC32 over all preceding row-group bytes
+```
+
+The current public Phase 3 API writes exactly one row group and accepts only
+explicit boolean bitmap columns. The body is independently checksummed and
+structured so the later streaming writer can emit repeated row groups. Footer
+index work remains outside Phase 3.
+
 ## Column Chunk
 
 Minimum column chunk metadata:
@@ -77,10 +96,31 @@ checked arithmetic before allocating or slicing.
 Examples:
 
 - Bitpack: bit width and encoded non-null value count.
-- Boolean bitmap: logical bit count.
+- Boolean bitmap: 8-byte little-endian non-null value count.
 - Prefix string: reset mode and string count.
 - Dictionary: dictionary entry count.
 - Stored: value framing mode.
+
+### Boolean Bitmap Payload
+
+Phase 3 uses this payload layout:
+
+```text
+[validity bitmap, only when nullable]
+[value bitmap for non-null values]
+```
+
+Both bitmaps use least-significant-bit-first ordering inside each byte and
+zero-filled padding in the last byte. For `N` logical rows and `K` non-null
+values:
+
+- Validity length is `ceil(N / 8)` bytes when nullable, otherwise zero.
+- Value length is `ceil(K / 8)` bytes.
+- The validity bitmap uses `1 = present` and `0 = null`.
+- The value bitmap contains only present values in row order.
+
+The decoder derives both lengths from metadata, rejects non-zero padding, and
+checks that validity set bits equal `value_count - null_count`.
 
 The decoder must reject:
 
@@ -100,4 +140,3 @@ not required for v0.3.
 
 Fast footer lookup using an EOF pointer remains optional until random access is
 implemented.
-

@@ -5,6 +5,8 @@
 //! column, encoding each column independently, and storing those column payloads
 //! inside one outer frame.
 
+pub mod v3;
+
 use std::collections::HashMap;
 
 use serde_json::{Map, Value};

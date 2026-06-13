@@ -75,6 +75,21 @@ Decode procedure:
 4. Merge values with null positions.
 5. Reject extra or missing decoded values.
 
+## Implemented Phase 3 Contract
+
+The shared bitmap primitive is implemented in
+`crates/compact-core/src/primitives/bitmap.rs`. Boolean column assembly and
+validation are implemented in `crates/compact-core/src/codecs/v3/boolean.rs`.
+
+The boolean encoder accepts only `type: bool` with `codec: bitmap`. It emits
+`ColumnChunkMetadata` and a payload consumed by the one-shot CMP3 JSONL API in
+`crates/compact-core/src/io/v3.rs`. That API supports multiple boolean columns,
+schema validation, canonical JSONL reconstruction, and row-group checksums.
+
+The one-shot writer intentionally rejects numeric and string columns until
+their CMP3 codecs exist. Multi-row-group streaming and the footer index are
+later integration work, not Phase 3 behavior.
+
 ## Required Edge Cases
 
 - Empty column.
@@ -87,4 +102,3 @@ Decode procedure:
 - Required field explicitly null.
 - Nullable field missing.
 - Bitmap with non-zero padding bits.
-

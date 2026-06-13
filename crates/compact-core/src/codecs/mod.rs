@@ -3,6 +3,8 @@
 //! Codecs are the first user-facing layer above primitives and pipelines. They
 //! still do not write frame headers or checksums; that belongs to `framing`.
 
+pub mod v3;
+
 use crate::primitives::rle;
 use crate::{Codec, CompactError, EncodeConfig, Transform, ValueType};
 
