@@ -58,6 +58,7 @@ Run the frame decoder fuzz target:
 
 ```sh
 cargo fuzz run frame_decode
+ cargo fuzz run cmp3_decode
 ```
 
 Let it run for several minutes during normal development. Let it run longer

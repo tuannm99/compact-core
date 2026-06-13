@@ -4,6 +4,7 @@ use crate::format::v3::ColumnChunkMetadata;
 
 pub mod boolean;
 pub mod numeric;
+pub mod string;
 
 /// One encoded CMP3 column before row-group framing.
 #[derive(Debug, Clone, PartialEq, Eq)]

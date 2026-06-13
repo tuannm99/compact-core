@@ -52,55 +52,63 @@ Exit criteria:
 
 ## Phase 4: Column Statistics
 
-- Persist counts, sizes, selected codec, and type-specific statistics.
-- Extend inspect output.
-- Validate statistics against decoded counts.
+Status: implemented.
+
+- Persist counts, sizes, selected codec, and type-specific statistics. Done.
+- Extend inspect output. Done.
+- Validate statistics against decoded counts. Done.
 
 Exit criteria:
 
-- Inspect reports stats without value decode.
-- Corrupt statistics return errors.
+- Inspect reports stats without value decode. Done.
+- Corrupt statistics return errors. Done.
 
 ## Phase 5: Prefix Strings and Cardinality
 
-- Implement block-local prefix string codec.
-- Bound dictionary candidate memory.
-- Handle high-cardinality fallback.
-- Keep blocks independently decodable.
+Status: implemented.
+
+- Implement block-local prefix string codec. Done.
+- Bound dictionary candidate memory. Done at 4,096 entries.
+- Handle high-cardinality fallback. Done through stored candidate.
+- Keep blocks independently decodable. Done.
 
 Exit criteria:
 
-- Prefix-friendly strings improve.
-- Random/high-cardinality strings fall back.
-- Unicode roundtrips exactly.
+- Prefix-friendly strings improve. Done.
+- Random/high-cardinality strings fall back. Done.
+- Unicode roundtrips exactly. Done.
 
 ## Phase 6: Adaptive Selection
 
-- Add `codec: auto`.
-- Evaluate complete bounded block candidates.
-- Select by total encoded size.
-- Define deterministic tie-breaking.
-- Persist actual selected codec.
+Status: implemented.
+
+- Add `codec: auto`. Done.
+- Evaluate complete bounded block candidates. Done.
+- Select by total encoded size. Done.
+- Define deterministic tie-breaking. Done.
+- Persist actual selected codec. Done.
 
 Exit criteria:
 
-- Decoder never guesses.
-- Repeated encoding is byte-stable.
-- Stored fallback always exists.
+- Decoder never guesses. Done.
+- Repeated encoding is byte-stable. Done.
+- Stored fallback always exists. Done.
 
 ## Phase 7: Benchmark and Release
 
-- Add v0.2/v0.3/gzip benchmark report.
-- Extend CLI integration tests.
-- Extend fuzzing to `CMP3`.
-- Add `docs/v0.3.md`.
-- Bump workspace to `0.3.0`.
+Status: implemented and validated for v0.3.0.
+
+- Add v0.2/v0.3/gzip benchmark report. Done.
+- Extend CLI integration tests. Done.
+- Extend fuzzing to `CMP3`. Done.
+- Add `docs/v0.3.md`. Done.
+- Bump workspace to `0.3.0`. Done.
 
 Exit criteria:
 
-- v0.3 DoD is checked explicitly.
-- Full workspace validation passes.
-- Release limitations are documented.
+- v0.3 DoD is checked explicitly. Done.
+- Full workspace validation passes. Done.
+- Release limitations are documented. Done.
 
 ## Commit Boundaries
 

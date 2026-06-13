@@ -113,11 +113,8 @@ Support large files with bounded memory and streaming encode/decode flows.
 
 ## v0.3 - Advanced Column Compression
 
-Status: Phases 1, 2, and 3 are committed. CMP3 supports numeric bit packing,
-delta bitpacking, stored fallback, nullable boolean/u64 columns, and mixed
-bool/u64 JSONL. This checkpoint is published as `v0.3.0-alpha.3`; see
-[v0.3-alpha.3.md](v0.3-alpha.3.md). Remaining implementation is tracked in
-[v0.3/07-implementation-plan.md](project-knowledge/compact-core/v0.3/07-implementation-plan.md).
+Status: implemented for stable v0.3. See [v0.3.md](v0.3.md) and the
+[benchmark report](v0.3-benchmarks.md).
 
 ### Goal
 

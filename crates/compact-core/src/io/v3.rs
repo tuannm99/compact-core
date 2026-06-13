@@ -10,6 +10,7 @@ use serde_json::{Map, Value};
 use crate::codecs::v3::EncodedColumnChunk;
 use crate::codecs::v3::boolean::{decode_boolean_column, encode_boolean_column};
 use crate::codecs::v3::numeric::{decode_u64_column, encode_u64_column};
+use crate::codecs::v3::string::{decode_string_column, encode_string_column};
 use crate::format::v3::{
     ColumnChunkMetadata, decode_column_metadata, decode_header, encode_column_metadata,
     encode_empty_header,
@@ -20,6 +21,20 @@ use crate::{CompactError, Result};
 
 const ROW_GROUP_MAGIC: [u8; 4] = *b"RGB3";
 const CHECKSUM_LEN: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inspect {
+    pub row_count: u64,
+    pub raw_size: u64,
+    pub encoded_size: usize,
+    pub columns: Vec<ColumnInspect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnInspect {
+    pub metadata: ColumnChunkMetadata,
+    pub statistics: crate::statistics::ColumnStatistics,
+}
 
 /// Encode JSONL into a single-row-group CMP3 file.
 ///
@@ -161,20 +176,112 @@ pub fn decode_jsonl(data: &[u8], schema: &Schema) -> Result<String> {
     render_rows(columns, &decoded_columns, row_count)
 }
 
+/// Inspect CMP3 metadata and statistics without decoding column values.
+pub fn inspect_jsonl(data: &[u8]) -> Result<Inspect> {
+    let header = decode_header(data)?;
+    let row_group = data
+        .get(header.body_offset..)
+        .ok_or(CompactError::InvalidInput("cmp3 row group is truncated"))?;
+    if row_group.len() < CHECKSUM_LEN {
+        return Err(CompactError::InvalidInput("cmp3 row group is truncated"));
+    }
+    let checksum_offset = row_group.len() - CHECKSUM_LEN;
+    let stored_checksum = u32::from_le_bytes(
+        row_group[checksum_offset..]
+            .try_into()
+            .expect("checksum suffix contains four bytes"),
+    );
+    if !crc32::verify(&row_group[..checksum_offset], stored_checksum) {
+        return Err(CompactError::InvalidInput(
+            "cmp3 row group checksum mismatch",
+        ));
+    }
+    let body = &row_group[..checksum_offset];
+    let mut cursor = 0;
+    if read_exact(body, &mut cursor, 4, "cmp3 row group magic is truncated")? != ROW_GROUP_MAGIC {
+        return Err(CompactError::InvalidInput("invalid cmp3 row group magic"));
+    }
+    read_u64(body, &mut cursor, "cmp3 block index is truncated")?;
+    read_u64(body, &mut cursor, "cmp3 first row index is truncated")?;
+    let row_count = read_u64(body, &mut cursor, "cmp3 row count is truncated")?;
+    let raw_size = read_u64(body, &mut cursor, "cmp3 raw jsonl size is truncated")?;
+    let column_count = read_u32(body, &mut cursor, "cmp3 column count is truncated")? as usize;
+    let mut columns = Vec::with_capacity(column_count);
+    for _ in 0..column_count {
+        let metadata_len = read_u32(
+            body,
+            &mut cursor,
+            "cmp3 column metadata length is truncated",
+        )? as usize;
+        let bytes = read_exact(
+            body,
+            &mut cursor,
+            metadata_len,
+            "cmp3 column metadata is truncated",
+        )?;
+        let (metadata, consumed) = decode_column_metadata(bytes)?;
+        if consumed != bytes.len() {
+            return Err(CompactError::InvalidInput(
+                "cmp3 column metadata has trailing bytes",
+            ));
+        }
+        if metadata.value_count != row_count {
+            return Err(CompactError::InvalidInput(
+                "cmp3 column value count does not match row group",
+            ));
+        }
+        let statistics = crate::statistics::decode(&metadata.statistics_metadata)?;
+        validate_statistics(&metadata)?;
+        let payload_len = usize::try_from(metadata.compressed_size)
+            .map_err(|_| CompactError::InvalidInput("cmp3 column payload is too large"))?;
+        read_exact(
+            body,
+            &mut cursor,
+            payload_len,
+            "cmp3 column payload is truncated",
+        )?;
+        columns.push(ColumnInspect {
+            metadata,
+            statistics,
+        });
+    }
+    if cursor != body.len() {
+        return Err(CompactError::InvalidInput(
+            "cmp3 row group has trailing bytes",
+        ));
+    }
+    Ok(Inspect {
+        row_count,
+        raw_size,
+        encoded_size: data.len(),
+        columns,
+    })
+}
+
 fn validate_implemented_schema(schema: &Schema) -> Result<&[ColumnSchema]> {
     let columns = schema.supported_columns_v3()?;
 
     for column in columns {
         let implemented = match column.value_type {
-            SchemaValueType::Bool => column.codec == SchemaCodec::Bitmap,
+            SchemaValueType::Bool => {
+                matches!(column.codec, SchemaCodec::Auto | SchemaCodec::Bitmap)
+            }
             SchemaValueType::U64 => matches!(
                 column.codec,
-                SchemaCodec::Bitpack
+                SchemaCodec::Auto
+                    | SchemaCodec::Bitpack
                     | SchemaCodec::DeltaBitpack
                     | SchemaCodec::DeltaVarintU64
                     | SchemaCodec::Stored
             ),
-            SchemaValueType::String => false,
+            SchemaValueType::String => matches!(
+                column.codec,
+                SchemaCodec::Auto
+                    | SchemaCodec::Dictionary
+                    | SchemaCodec::Prefix
+                    | SchemaCodec::Rle
+                    | SchemaCodec::Stored
+            ),
         };
         if !implemented {
             return Err(CompactError::Unsupported(
@@ -187,23 +294,132 @@ fn validate_implemented_schema(schema: &Schema) -> Result<&[ColumnSchema]> {
 }
 
 fn encode_column(column: &ColumnSchema, rows: &[Map<String, Value>]) -> Result<EncodedColumnChunk> {
+    if column.codec == SchemaCodec::Auto {
+        return select_auto_column(column, rows);
+    }
     match column.value_type {
         SchemaValueType::Bool => encode_boolean_column(column, rows),
         SchemaValueType::U64 => encode_u64_column(column, rows),
-        SchemaValueType::String => Err(CompactError::Unsupported(
-            "cmp3 jsonl column codec is not implemented",
-        )),
+        SchemaValueType::String => encode_string_column(column, rows),
     }
 }
 
 fn decode_column(metadata: &ColumnChunkMetadata, payload: &[u8]) -> Result<DecodedColumn> {
-    match metadata.value_type {
+    validate_statistics(metadata)?;
+    let decoded = match metadata.value_type {
         SchemaValueType::Bool => decode_boolean_column(metadata, payload).map(DecodedColumn::Bool),
         SchemaValueType::U64 => decode_u64_column(metadata, payload).map(DecodedColumn::U64),
-        SchemaValueType::String => Err(CompactError::Unsupported(
-            "cmp3 jsonl column codec is not implemented",
+        SchemaValueType::String => {
+            decode_string_column(metadata, payload).map(DecodedColumn::String)
+        }
+    }?;
+    validate_decoded_statistics(metadata, &decoded)?;
+    Ok(decoded)
+}
+
+fn select_auto_column(
+    column: &ColumnSchema,
+    rows: &[Map<String, Value>],
+) -> Result<EncodedColumnChunk> {
+    let candidates: &[SchemaCodec] = match column.value_type {
+        SchemaValueType::Bool => &[SchemaCodec::Bitmap],
+        SchemaValueType::U64 => &[
+            SchemaCodec::DeltaBitpack,
+            SchemaCodec::Bitpack,
+            SchemaCodec::DeltaVarintU64,
+            SchemaCodec::Stored,
+        ],
+        SchemaValueType::String => &[
+            SchemaCodec::Prefix,
+            SchemaCodec::Dictionary,
+            SchemaCodec::Rle,
+            SchemaCodec::Stored,
+        ],
+    };
+    let mut best: Option<(usize, EncodedColumnChunk)> = None;
+    let mut first_error = None;
+    for &codec in candidates {
+        let mut candidate_column = column.clone();
+        candidate_column.codec = codec;
+        match encode_column(&candidate_column, rows) {
+            Ok(chunk) => {
+                let size = encode_column_metadata(&chunk.metadata)?
+                    .len()
+                    .checked_add(chunk.payload.len())
+                    .ok_or(CompactError::InvalidInput(
+                        "cmp3 candidate encoded size overflow",
+                    ))?;
+                if best.as_ref().is_none_or(|(best_size, _)| size < *best_size) {
+                    best = Some((size, chunk));
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    best.map(|(_, chunk)| chunk)
+        .ok_or_else(|| first_error.unwrap_or(CompactError::Unsupported("no cmp3 codec candidate")))
+}
+
+fn validate_statistics(metadata: &ColumnChunkMetadata) -> Result<()> {
+    use crate::statistics::ColumnStatistics;
+
+    let statistics = crate::statistics::decode(&metadata.statistics_metadata)?;
+    let non_null_count = metadata.value_count - metadata.null_count;
+    match (metadata.value_type, statistics) {
+        (SchemaValueType::U64, ColumnStatistics::None) if non_null_count == 0 => Ok(()),
+        (SchemaValueType::U64, ColumnStatistics::U64 { .. }) => Ok(()),
+        (SchemaValueType::Bool, ColumnStatistics::Bool { true_count })
+            if true_count <= non_null_count =>
+        {
+            Ok(())
+        }
+        (SchemaValueType::String, ColumnStatistics::String { distinct_count })
+            if distinct_count <= non_null_count =>
+        {
+            Ok(())
+        }
+        _ => Err(CompactError::InvalidInput(
+            "cmp3 statistics do not match column metadata",
         )),
     }
+}
+
+fn validate_decoded_statistics(
+    metadata: &ColumnChunkMetadata,
+    decoded: &DecodedColumn,
+) -> Result<()> {
+    use crate::statistics::ColumnStatistics;
+
+    let statistics = crate::statistics::decode(&metadata.statistics_metadata)?;
+    let matches = match (decoded, statistics) {
+        (DecodedColumn::U64(values), ColumnStatistics::None) => values.iter().all(Option::is_none),
+        (DecodedColumn::U64(values), ColumnStatistics::U64 { min, max }) => {
+            let actual_min = values.iter().filter_map(|value| *value).min();
+            let actual_max = values.iter().filter_map(|value| *value).max();
+            actual_min == Some(min) && actual_max == Some(max)
+        }
+        (DecodedColumn::Bool(values), ColumnStatistics::Bool { true_count }) => {
+            values.iter().filter(|value| **value == Some(true)).count() as u64 == true_count
+        }
+        (DecodedColumn::String(values), ColumnStatistics::String { distinct_count }) => {
+            use std::collections::HashSet;
+            values
+                .iter()
+                .filter_map(Option::as_deref)
+                .collect::<HashSet<_>>()
+                .len() as u64
+                == distinct_count
+        }
+        _ => false,
+    };
+    if !matches {
+        return Err(CompactError::InvalidInput(
+            "cmp3 statistics do not match decoded values",
+        ));
+    }
+    Ok(())
 }
 
 fn parse_rows(input: &str) -> Result<Vec<Map<String, Value>>> {
@@ -229,7 +445,7 @@ fn validate_metadata_against_schema(
     if metadata.name != column.name
         || metadata.value_type != column.value_type
         || metadata.nullable != column.nullable
-        || metadata.codec != column.codec
+        || (column.codec != SchemaCodec::Auto && metadata.codec != column.codec)
     {
         return Err(CompactError::InvalidInput(
             "cmp3 column metadata does not match schema",
@@ -277,6 +493,7 @@ fn render_rows(
 enum DecodedColumn {
     Bool(Vec<Option<bool>>),
     U64(Vec<Option<u64>>),
+    String(Vec<Option<String>>),
 }
 
 impl DecodedColumn {
@@ -294,6 +511,12 @@ impl DecodedColumn {
                     "cmp3 decoded column is shorter than row count",
                 ))
                 .map(|value| value.map_or(Value::Null, Value::from)),
+            Self::String(values) => values
+                .get(row_index)
+                .ok_or(CompactError::InvalidInput(
+                    "cmp3 decoded column is shorter than row count",
+                ))
+                .map(|value| value.clone().map_or(Value::Null, Value::String)),
         }
     }
 }
@@ -334,7 +557,7 @@ fn read_u64(data: &[u8], cursor: &mut usize, err: &'static str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_jsonl, encode_jsonl};
+    use super::{decode_jsonl, encode_jsonl, inspect_jsonl};
     use crate::CompactError;
     use crate::primitives::crc32;
     use crate::schema::Schema;
@@ -500,7 +723,7 @@ columns:
     }
 
     #[test]
-    fn cmp3_jsonl_rejects_unimplemented_string_columns() {
+    fn cmp3_jsonl_roundtrips_prefix_strings() {
         let string = Schema::from_yaml(
             r#"
 columns:
@@ -510,11 +733,56 @@ columns:
 "#,
         )
         .unwrap();
-        let err = encode_jsonl("{\"message\":\"hello\"}\n", &string).unwrap_err();
+        let input = "{\"message\":\"service/api\"}\n{\"message\":\"service/admin\"}\n";
+        let encoded = encode_jsonl(input, &string).unwrap();
+        assert_eq!(decode_jsonl(&encoded, &string).unwrap(), input);
+    }
 
-        assert!(matches!(
-            err,
-            CompactError::Unsupported("cmp3 jsonl column codec is not implemented")
-        ));
+    #[test]
+    fn cmp3_auto_selection_is_deterministic_and_roundtrips() {
+        let schema = Schema::from_yaml(
+            r#"
+columns:
+  - name: ts
+    type: u64
+    codec: auto
+  - name: path
+    type: string
+    codec: auto
+"#,
+        )
+        .unwrap();
+        let input = "{\"ts\":1000,\"path\":\"service/api/users\"}\n{\"ts\":1001,\"path\":\"service/api/orders\"}\n";
+        let first = encode_jsonl(input, &schema).unwrap();
+        let second = encode_jsonl(input, &schema).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(decode_jsonl(&first, &schema).unwrap(), input);
+
+        let inspect = inspect_jsonl(&first).unwrap();
+        assert_eq!(inspect.row_count, 2);
+        assert_eq!(inspect.columns.len(), 2);
+        assert_ne!(
+            inspect.columns[0].metadata.codec,
+            crate::schema::SchemaCodec::Auto
+        );
+        assert_ne!(
+            inspect.columns[1].metadata.codec,
+            crate::schema::SchemaCodec::Auto
+        );
+    }
+
+    #[test]
+    fn cmp3_auto_uses_stored_for_uncompressible_short_strings() {
+        let schema =
+            Schema::from_yaml("columns:\n  - name: value\n    type: string\n    codec: auto\n")
+                .unwrap();
+        let encoded = encode_jsonl("{\"value\":\"a\"}\n{\"value\":\"z\"}\n", &schema).unwrap();
+        let inspect = inspect_jsonl(&encoded).unwrap();
+
+        assert_eq!(
+            inspect.columns[0].metadata.codec,
+            crate::schema::SchemaCodec::Stored
+        );
     }
 }

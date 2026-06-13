@@ -26,6 +26,8 @@ enum Commands {
         block_rows: Option<usize>,
         #[arg(long)]
         block_bytes: Option<usize>,
+        #[arg(long, value_enum, default_value_t = CliFormat::V2)]
+        format: CliFormat,
     },
     Decode {
         input: String,
@@ -34,6 +36,8 @@ enum Commands {
         codec: CliCodec,
         #[arg(long)]
         schema: Option<String>,
+        #[arg(long, value_enum, default_value_t = CliFormat::V2)]
+        format: CliFormat,
     },
     Inspect {
         input: String,
@@ -46,12 +50,20 @@ enum Commands {
         block_rows: Option<usize>,
         #[arg(long)]
         block_bytes: Option<usize>,
+        #[arg(long, value_enum, default_value_t = CliFormat::V2)]
+        format: CliFormat,
     },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliCodec {
     Rle,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliFormat {
+    V2,
+    V3,
 }
 
 fn main() -> Result<()> {
@@ -65,23 +77,35 @@ fn main() -> Result<()> {
             schema,
             block_rows,
             block_bytes,
+            format,
         } => {
             if let Some(schema_path) = schema {
                 let schema = load_schema(&schema_path)?;
-                let options = block_options(block_rows, block_bytes)
-                    .context("invalid streaming block options")?;
-                let input_file =
-                    fs::File::open(&input).with_context(|| format!("failed to open {input}"))?;
-                let output_file = fs::File::create(&output)
-                    .with_context(|| format!("failed to create {output}"))?;
-
-                compact_core::streaming::encode_jsonl_stream(
-                    BufReader::new(input_file),
-                    output_file,
-                    schema,
-                    options,
-                )
-                .context("failed to stream encode JSONL input")?;
+                match format {
+                    CliFormat::V2 => {
+                        let options = block_options(block_rows, block_bytes)
+                            .context("invalid streaming block options")?;
+                        let input_file = fs::File::open(&input)
+                            .with_context(|| format!("failed to open {input}"))?;
+                        let output_file = fs::File::create(&output)
+                            .with_context(|| format!("failed to create {output}"))?;
+                        compact_core::streaming::encode_jsonl_stream(
+                            BufReader::new(input_file),
+                            output_file,
+                            schema,
+                            options,
+                        )
+                        .context("failed to stream encode JSONL input")?;
+                    }
+                    CliFormat::V3 => {
+                        let input_text = fs::read_to_string(&input)
+                            .with_context(|| format!("failed to read {input} as UTF-8 JSONL"))?;
+                        let encoded = compact_core::io::v3::encode_jsonl(&input_text, &schema)
+                            .context("failed to encode CMP3 JSONL input")?;
+                        fs::write(&output, encoded)
+                            .with_context(|| format!("failed to write {output}"))?;
+                    }
+                }
             } else {
                 let config = codec.byte_config();
                 let input_bytes =
@@ -105,16 +129,32 @@ fn main() -> Result<()> {
             output,
             codec,
             schema,
+            format,
         } => {
             if let Some(schema_path) = schema {
                 let schema = load_schema(&schema_path)?;
-                let input_file =
-                    fs::File::open(&input).with_context(|| format!("failed to open {input}"))?;
-                let output_file = fs::File::create(&output)
-                    .with_context(|| format!("failed to create {output}"))?;
-
-                compact_core::streaming::decode_jsonl_stream(input_file, output_file, schema)
-                    .context("failed to stream decode JSONL input")?;
+                match format {
+                    CliFormat::V2 => {
+                        let input_file = fs::File::open(&input)
+                            .with_context(|| format!("failed to open {input}"))?;
+                        let output_file = fs::File::create(&output)
+                            .with_context(|| format!("failed to create {output}"))?;
+                        compact_core::streaming::decode_jsonl_stream(
+                            input_file,
+                            output_file,
+                            schema,
+                        )
+                        .context("failed to stream decode JSONL input")?;
+                    }
+                    CliFormat::V3 => {
+                        let encoded =
+                            fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+                        let decoded = compact_core::io::v3::decode_jsonl(&encoded, &schema)
+                            .context("failed to decode CMP3 JSONL input")?;
+                        fs::write(&output, decoded)
+                            .with_context(|| format!("failed to write {output}"))?;
+                    }
+                }
             } else {
                 let frame = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
                 let config = codec.byte_config();
@@ -133,42 +173,66 @@ fn main() -> Result<()> {
             schema,
             block_rows,
             block_bytes,
+            format,
         } => {
             let schema = load_schema(&schema)?;
-            let options = block_options(block_rows, block_bytes)
-                .context("invalid streaming block options")?;
             let input_text = fs::read_to_string(&input)
                 .with_context(|| format!("failed to read {input} as UTF-8 JSONL"))?;
             let input_bytes = input_text.len() as u64;
             let encode_start = Instant::now();
-            let encoded = compact_core::streaming::encode_jsonl_stream(
-                BufReader::new(Cursor::new(input_text.as_bytes())),
-                Vec::new(),
-                schema.clone(),
-                options,
-            )
-            .context("failed to stream encode JSONL benchmark input")?;
+            let encoded = match format {
+                CliFormat::V2 => {
+                    let options = block_options(block_rows, block_bytes)
+                        .context("invalid streaming block options")?;
+                    compact_core::streaming::encode_jsonl_stream(
+                        BufReader::new(Cursor::new(input_text.as_bytes())),
+                        Vec::new(),
+                        schema.clone(),
+                        options,
+                    )
+                    .context("failed to stream encode JSONL benchmark input")?
+                }
+                CliFormat::V3 => compact_core::io::v3::encode_jsonl(&input_text, &schema)
+                    .context("failed to encode CMP3 benchmark input")?,
+            };
             let encode_elapsed = encode_start.elapsed();
-            let inspect = compact_core::streaming::inspect_stream(Cursor::new(&encoded))
-                .context("failed to inspect benchmark stream")?;
             let decode_start = Instant::now();
-            let decoded = compact_core::streaming::decode_jsonl_stream(
-                Cursor::new(&encoded),
-                Vec::new(),
-                schema,
-            )
-            .context("failed to stream decode JSONL benchmark input")?;
+            let decoded = match format {
+                CliFormat::V2 => compact_core::streaming::decode_jsonl_stream(
+                    Cursor::new(&encoded),
+                    Vec::new(),
+                    schema,
+                )
+                .context("failed to stream decode JSONL benchmark input")?,
+                CliFormat::V3 => compact_core::io::v3::decode_jsonl(&encoded, &schema)
+                    .context("failed to decode CMP3 benchmark input")?
+                    .into_bytes(),
+            };
             let decode_elapsed = decode_start.elapsed();
 
             if decoded != input_text.as_bytes() {
                 anyhow::bail!("benchmark roundtrip mismatch");
             }
 
-            println!("mode: stream");
-            println!("block_rows: {}", options.max_rows_per_block);
-            println!("block_bytes: {}", options.max_uncompressed_bytes_per_block);
-            println!("blocks: {}", inspect.blocks.len());
-            println!("rows: {}", inspect.total_rows);
+            match format {
+                CliFormat::V2 => {
+                    let options = block_options(block_rows, block_bytes)?;
+                    let inspect = compact_core::streaming::inspect_stream(Cursor::new(&encoded))
+                        .context("failed to inspect benchmark stream")?;
+                    println!("mode: stream");
+                    println!("block_rows: {}", options.max_rows_per_block);
+                    println!("block_bytes: {}", options.max_uncompressed_bytes_per_block);
+                    println!("blocks: {}", inspect.blocks.len());
+                    println!("rows: {}", inspect.total_rows);
+                }
+                CliFormat::V3 => {
+                    let inspect = compact_core::io::v3::inspect_jsonl(&encoded)
+                        .context("failed to inspect CMP3 benchmark")?;
+                    println!("mode: v3");
+                    println!("blocks: 1");
+                    println!("rows: {}", inspect.row_count);
+                }
+            }
             println!("input_bytes: {}", input_bytes);
             println!("encoded_bytes: {}", encoded.len());
             println!(
@@ -192,11 +256,36 @@ fn main() -> Result<()> {
 }
 
 fn inspect_file(data: &[u8]) -> Result<()> {
-    if data.len() >= 4 && data[0..4] == compact_core::MAGIC_V2 {
+    if data.len() >= 4 && data[0..4] == compact_core::MAGIC_V3 {
+        inspect_v3_file(data)
+    } else if data.len() >= 4 && data[0..4] == compact_core::MAGIC_V2 {
         inspect_stream_file(data)
     } else {
         inspect_v1_frame(data)
     }
+}
+
+fn inspect_v3_file(data: &[u8]) -> Result<()> {
+    let inspect = compact_core::io::v3::inspect_jsonl(data).context("failed to inspect CMP3")?;
+    println!("version: {}", compact_core::VERSION_V3);
+    println!("format: cmp3");
+    println!("rows: {}", inspect.row_count);
+    println!("raw_bytes: {}", inspect.raw_size);
+    println!("encoded_bytes: {}", inspect.encoded_size);
+    for column in inspect.columns {
+        println!(
+            "column name={} type={:?} codec={:?} rows={} nulls={} raw={} compressed={} stats={:?}",
+            column.metadata.name,
+            column.metadata.value_type,
+            column.metadata.codec,
+            column.metadata.value_count,
+            column.metadata.null_count,
+            column.metadata.raw_size,
+            column.metadata.compressed_size,
+            column.statistics
+        );
+    }
+    Ok(())
 }
 
 fn inspect_stream_file(data: &[u8]) -> Result<()> {

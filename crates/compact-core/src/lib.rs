@@ -9,6 +9,7 @@ pub mod io;
 pub mod pipeline;
 pub mod primitives;
 pub mod schema;
+pub mod statistics;
 pub mod streaming;
 mod transforms;
 
@@ -147,7 +148,7 @@ mod tests {
 
     #[test]
     fn version_is_set() {
-        assert_eq!(crate_version(), "0.3.0-alpha.3");
+        assert_eq!(crate_version(), "0.3.0");
     }
 
     #[test]

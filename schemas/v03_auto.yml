@@ -1,0 +1,10 @@
+columns:
+  - name: ts
+    type: u64
+    codec: auto
+  - name: level
+    type: string
+    codec: auto
+  - name: path
+    type: string
+    codec: auto

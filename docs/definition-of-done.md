@@ -79,6 +79,9 @@ for release notes, supported behavior, and remaining limitations.
 
 ## v0.3 - Advanced Column Compression
 
+Status: implemented. See [v0.3.md](v0.3.md) and
+[v0.3-benchmarks.md](v0.3-benchmarks.md).
+
 ### Scope
 
 - Columnar optimization
@@ -95,18 +98,18 @@ for release notes, supported behavior, and remaining limitations.
 
 ### Definition of Done
 
-- Adaptive codec chooser works
-- Compression ratio beats `gzip` on structured logs
-- Prefix compression implemented
-- Nullable columns supported
-- Per-column statistics stored
-- Dictionary reuse supported
-- `compact inspect` shows column stats
-- Compression benchmark report generated
-- Configurable codec pipeline
-- Codec fallback supported
-- Large-cardinality strings handled
-- Decode remains lossless
+- Adaptive codec chooser works: implemented
+- Compression ratio beats `gzip` on structured logs: measured
+- Prefix compression implemented: implemented
+- Nullable columns supported: implemented
+- Per-column statistics stored: implemented
+- Dictionary reuse supported: implemented within each independently decodable block
+- `compact inspect` shows column stats: implemented
+- Compression benchmark report generated: implemented
+- Configurable codec pipeline: implemented through schema codecs
+- Codec fallback supported: implemented with stored candidates
+- Large-cardinality strings handled: bounded dictionary with fallback
+- Decode remains lossless: covered by core and CLI roundtrip tests
 
 ## v0.4 - Queryable Columnar Format
 

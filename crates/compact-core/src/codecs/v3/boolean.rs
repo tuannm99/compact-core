@@ -86,6 +86,9 @@ pub fn encode_boolean_column(
             raw_size: non_null_count,
             compressed_size,
             codec_metadata: non_null_count.to_le_bytes().to_vec(),
+            statistics_metadata: crate::statistics::encode_bool(
+                values.iter().filter(|&&value| value).count() as u64,
+            ),
         },
         payload,
     })
@@ -114,6 +117,11 @@ pub fn decode_boolean_column(
     } else {
         0
     };
+    if validity_len > payload.len() {
+        return Err(CompactError::InvalidInput(
+            "cmp3 boolean validity bitmap is truncated",
+        ));
+    }
     let (validity_payload, value_payload) = payload.split_at(validity_len);
 
     let validity = if metadata.nullable {

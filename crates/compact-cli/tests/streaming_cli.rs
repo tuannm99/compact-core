@@ -93,6 +93,22 @@ fn run(args: &[&str]) -> Output {
         .expect("compact command should run")
 }
 
+fn write_v3_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+    let input = dir.join("v3.jsonl");
+    let schema = dir.join("v3.yml");
+    fs::write(
+        &input,
+        "{\"ts\":1000,\"active\":true,\"path\":\"service/api\"}\n{\"ts\":1001,\"active\":false,\"path\":\"service/admin\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        &schema,
+        "columns:\n  - name: ts\n    type: u64\n    codec: auto\n  - name: active\n    type: bool\n    codec: auto\n  - name: path\n    type: string\n    codec: auto\n",
+    )
+    .unwrap();
+    (input, schema)
+}
+
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -267,6 +283,54 @@ fn generated_jsonl_roundtrips_across_many_blocks() {
     assert_success(&decode);
 
     assert_eq!(fs::read(&decoded).unwrap(), fs::read(&input).unwrap());
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn cmp3_cli_roundtrip_inspect_and_bench() {
+    let dir = temp_case("cmp3");
+    let (input, schema) = write_v3_fixture(&dir);
+    let encoded = dir.join("encoded.cmp3");
+    let decoded = dir.join("decoded.jsonl");
+
+    assert_success(&run(&[
+        "encode",
+        input.to_str().unwrap(),
+        encoded.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v3",
+    ]));
+    assert_success(&run(&[
+        "decode",
+        encoded.to_str().unwrap(),
+        decoded.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v3",
+    ]));
+    assert_eq!(fs::read(&decoded).unwrap(), fs::read(&input).unwrap());
+
+    let inspect = run(&["inspect", encoded.to_str().unwrap()]);
+    assert_success(&inspect);
+    let stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(stdout.contains("format: cmp3"));
+    assert!(stdout.contains("codec="));
+    assert!(stdout.contains("stats="));
+
+    let bench = run(&[
+        "bench",
+        input.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v3",
+    ]);
+    assert_success(&bench);
+    assert!(String::from_utf8_lossy(&bench.stdout).contains("mode: v3"));
 
     fs::remove_dir_all(dir).ok();
 }

@@ -70,6 +70,10 @@ pub fn encode_u64_column(
                 .ok_or(CompactError::InvalidInput("cmp3 numeric raw size overflow"))?,
             compressed_size: count_u64(payload.len())?,
             codec_metadata,
+            statistics_metadata: crate::statistics::encode_u64(
+                values.iter().copied().min(),
+                values.iter().copied().max(),
+            ),
         },
         payload,
     })

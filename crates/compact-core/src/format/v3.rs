@@ -9,7 +9,7 @@ use crate::schema::{SchemaCodec, SchemaValueType};
 use crate::{CompactError, MAGIC_V3, Result, VERSION_V3};
 
 const FILE_HEADER_LEN: usize = 4 + 1 + 1 + 4;
-const COLUMN_FIXED_LEN: usize = 1 + 1 + 1 + 8 + 8 + 8 + 8 + 4;
+const COLUMN_FIXED_LEN: usize = 1 + 1 + 1 + 8 + 8 + 8 + 8 + 4 + 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileHeader {
@@ -29,6 +29,7 @@ pub struct ColumnChunkMetadata {
     pub raw_size: u64,
     pub compressed_size: u64,
     pub codec_metadata: Vec<u8>,
+    pub statistics_metadata: Vec<u8>,
 }
 
 /// Encode an empty CMP3 header with no optional header payload.
@@ -90,8 +91,14 @@ pub fn encode_column_metadata(metadata: &ColumnChunkMetadata) -> Result<Vec<u8>>
         .map_err(|_| CompactError::InvalidInput("cmp3 column name is too long"))?;
     let codec_metadata_len = u32::try_from(metadata.codec_metadata.len())
         .map_err(|_| CompactError::InvalidInput("cmp3 codec metadata is too large"))?;
-    let mut out =
-        Vec::with_capacity(2 + name.len() + COLUMN_FIXED_LEN + metadata.codec_metadata.len());
+    let statistics_metadata_len = u32::try_from(metadata.statistics_metadata.len())
+        .map_err(|_| CompactError::InvalidInput("cmp3 statistics metadata is too large"))?;
+    let mut out = Vec::with_capacity(
+        2 + name.len()
+            + COLUMN_FIXED_LEN
+            + metadata.codec_metadata.len()
+            + metadata.statistics_metadata.len(),
+    );
 
     out.extend_from_slice(&name_len.to_le_bytes());
     out.extend_from_slice(name);
@@ -104,6 +111,8 @@ pub fn encode_column_metadata(metadata: &ColumnChunkMetadata) -> Result<Vec<u8>>
     out.extend_from_slice(&metadata.compressed_size.to_le_bytes());
     out.extend_from_slice(&codec_metadata_len.to_le_bytes());
     out.extend_from_slice(&metadata.codec_metadata);
+    out.extend_from_slice(&statistics_metadata_len.to_le_bytes());
+    out.extend_from_slice(&metadata.statistics_metadata);
 
     Ok(out)
 }
@@ -140,6 +149,18 @@ pub fn decode_column_metadata(data: &[u8]) -> Result<(ColumnChunkMetadata, usize
         "cmp3 codec metadata is truncated",
     )?
     .to_vec();
+    let statistics_metadata_len = read_u32(
+        data,
+        &mut cursor,
+        "cmp3 statistics metadata length is truncated",
+    )? as usize;
+    let statistics_metadata = read_exact(
+        data,
+        &mut cursor,
+        statistics_metadata_len,
+        "cmp3 statistics metadata is truncated",
+    )?
+    .to_vec();
     let metadata = ColumnChunkMetadata {
         name,
         value_type,
@@ -150,6 +171,7 @@ pub fn decode_column_metadata(data: &[u8]) -> Result<(ColumnChunkMetadata, usize
         raw_size,
         compressed_size,
         codec_metadata,
+        statistics_metadata,
     };
 
     validate_column_metadata(&metadata)?;
@@ -313,6 +335,7 @@ mod tests {
             raw_size: 100,
             compressed_size: 25,
             codec_metadata: vec![93],
+            statistics_metadata: vec![1, 2, 3],
         }
     }
 
@@ -465,14 +488,14 @@ mod tests {
     }
 
     #[test]
-    fn column_metadata_rejects_truncated_codec_metadata() {
+    fn column_metadata_rejects_truncated_statistics_metadata() {
         let mut encoded = encode_column_metadata(&metadata()).unwrap();
         encoded.pop();
         let err = decode_column_metadata(&encoded).unwrap_err();
 
         assert!(matches!(
             err,
-            CompactError::InvalidInput("cmp3 codec metadata is truncated")
+            CompactError::InvalidInput("cmp3 statistics metadata is truncated")
         ));
     }
 }
