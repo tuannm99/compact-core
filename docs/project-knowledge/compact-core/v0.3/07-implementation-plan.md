@@ -17,23 +17,24 @@ Exit criteria:
 
 ## Phase 2: Numeric Bit Packing
 
-Status: not started.
+Status: implemented and committed.
 
-- Integrate the existing bitpack primitive into numeric columns.
-- Persist bit width.
-- Add delta-bitpack candidate.
-- Add stored numeric fallback.
-- Benchmark against delta-varint.
+- Integrate the existing bitpack primitive into numeric columns. Done.
+- Persist bit width. Done.
+- Add delta-bitpack candidate. Done.
+- Add stored numeric fallback. Done.
+- Benchmark against delta-varint. Done through deterministic size comparison.
 
 Exit criteria:
 
-- Widths 0 through 64 roundtrip.
-- Malformed metadata fails safely.
-- Constant/small-delta columns improve or fall back.
+- Widths 0 through 64 roundtrip. Done.
+- Malformed metadata fails safely. Done.
+- Constant/small-delta columns improve or fall back. Done with explicit stored
+  fallback; automatic selection remains Phase 6.
 
 ## Phase 3: Boolean and Nullability
 
-Status: implemented, pending commit.
+Status: implemented and committed.
 
 - Add boolean schema type. Done in Phase 1.
 - Add value bitmap. Done.

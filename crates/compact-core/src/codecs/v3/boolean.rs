@@ -12,14 +12,9 @@ use crate::primitives::bitmap;
 use crate::schema::{ColumnSchema, SchemaCodec, SchemaValueType};
 use crate::{CompactError, Result};
 
-const BOOLEAN_CODEC_METADATA_LEN: usize = 8;
+use super::EncodedColumnChunk;
 
-/// One encoded CMP3 column chunk before outer row-group framing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodedColumnChunk {
-    pub metadata: ColumnChunkMetadata,
-    pub payload: Vec<u8>,
-}
+const BOOLEAN_CODEC_METADATA_LEN: usize = 8;
 
 /// Encode a schema-defined boolean column from JSON object rows.
 ///

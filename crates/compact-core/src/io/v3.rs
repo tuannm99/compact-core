@@ -1,14 +1,15 @@
 //! End-to-end CMP3 JSONL support available after Phase 3.
 //!
 //! This module writes one independently checksummed row group containing
-//! boolean bitmap columns. Numeric and string columns remain unsupported until
-//! their CMP3 codecs land. The format is deliberately one-row-group for now;
-//! later streaming work can reuse the row-group body without changing boolean
-//! column payloads.
+//! typed column payloads. String columns remain unsupported until their CMP3
+//! codecs land. The format is deliberately one-row-group for now; later
+//! streaming work can reuse the row-group body without changing column codecs.
 
 use serde_json::{Map, Value};
 
+use crate::codecs::v3::EncodedColumnChunk;
 use crate::codecs::v3::boolean::{decode_boolean_column, encode_boolean_column};
+use crate::codecs::v3::numeric::{decode_u64_column, encode_u64_column};
 use crate::format::v3::{
     ColumnChunkMetadata, decode_column_metadata, decode_header, encode_column_metadata,
     encode_empty_header,
@@ -22,10 +23,11 @@ const CHECKSUM_LEN: usize = 4;
 
 /// Encode JSONL into a single-row-group CMP3 file.
 ///
-/// Phase 3 supports explicit `bool` columns using the `bitmap` codec. Nullable
-/// fields may be missing or JSON null; both decode as an explicit null field.
+/// Supported bool and u64 columns are encoded using their explicit schema
+/// codec. Nullable fields may be missing or JSON null; both decode as an
+/// explicit null field.
 pub fn encode_jsonl(input: &str, schema: &Schema) -> Result<Vec<u8>> {
-    let columns = validate_phase3_schema(schema)?;
+    let columns = validate_implemented_schema(schema)?;
     let rows = parse_rows(input)?;
     let row_count = u64::try_from(rows.len())
         .map_err(|_| CompactError::InvalidInput("cmp3 row count is too large"))?;
@@ -43,7 +45,7 @@ pub fn encode_jsonl(input: &str, schema: &Schema) -> Result<Vec<u8>> {
     row_group.extend_from_slice(&column_count.to_le_bytes());
 
     for column in columns {
-        let chunk = encode_boolean_column(column, &rows)?;
+        let chunk = encode_column(column, &rows)?;
         let metadata = encode_column_metadata(&chunk.metadata)?;
         let metadata_len = u32::try_from(metadata.len())
             .map_err(|_| CompactError::InvalidInput("cmp3 column metadata is too large"))?;
@@ -61,9 +63,9 @@ pub fn encode_jsonl(input: &str, schema: &Schema) -> Result<Vec<u8>> {
     Ok(file)
 }
 
-/// Decode a single-row-group CMP3 boolean file into canonical JSONL.
+/// Decode a single-row-group CMP3 file into canonical JSONL.
 pub fn decode_jsonl(data: &[u8], schema: &Schema) -> Result<String> {
-    let columns = validate_phase3_schema(schema)?;
+    let columns = validate_implemented_schema(schema)?;
     let header = decode_header(data)?;
     if !header.payload.is_empty() {
         return Err(CompactError::Unsupported("cmp3 header payload"));
@@ -147,7 +149,7 @@ pub fn decode_jsonl(data: &[u8], schema: &Schema) -> Result<String> {
             payload_len,
             "cmp3 column payload is truncated",
         )?;
-        decoded_columns.push(decode_boolean_column(&metadata, payload)?);
+        decoded_columns.push(decode_column(&metadata, payload)?);
     }
 
     if cursor != body.len() {
@@ -159,18 +161,49 @@ pub fn decode_jsonl(data: &[u8], schema: &Schema) -> Result<String> {
     render_rows(columns, &decoded_columns, row_count)
 }
 
-fn validate_phase3_schema(schema: &Schema) -> Result<&[ColumnSchema]> {
+fn validate_implemented_schema(schema: &Schema) -> Result<&[ColumnSchema]> {
     let columns = schema.supported_columns_v3()?;
 
-    if columns.iter().any(|column| {
-        column.value_type != SchemaValueType::Bool || column.codec != SchemaCodec::Bitmap
-    }) {
-        return Err(CompactError::Unsupported(
-            "phase 3 cmp3 jsonl requires bool bitmap columns",
-        ));
+    for column in columns {
+        let implemented = match column.value_type {
+            SchemaValueType::Bool => column.codec == SchemaCodec::Bitmap,
+            SchemaValueType::U64 => matches!(
+                column.codec,
+                SchemaCodec::Bitpack
+                    | SchemaCodec::DeltaBitpack
+                    | SchemaCodec::DeltaVarintU64
+                    | SchemaCodec::Stored
+            ),
+            SchemaValueType::String => false,
+        };
+        if !implemented {
+            return Err(CompactError::Unsupported(
+                "cmp3 jsonl column codec is not implemented",
+            ));
+        }
     }
 
     Ok(columns)
+}
+
+fn encode_column(column: &ColumnSchema, rows: &[Map<String, Value>]) -> Result<EncodedColumnChunk> {
+    match column.value_type {
+        SchemaValueType::Bool => encode_boolean_column(column, rows),
+        SchemaValueType::U64 => encode_u64_column(column, rows),
+        SchemaValueType::String => Err(CompactError::Unsupported(
+            "cmp3 jsonl column codec is not implemented",
+        )),
+    }
+}
+
+fn decode_column(metadata: &ColumnChunkMetadata, payload: &[u8]) -> Result<DecodedColumn> {
+    match metadata.value_type {
+        SchemaValueType::Bool => decode_boolean_column(metadata, payload).map(DecodedColumn::Bool),
+        SchemaValueType::U64 => decode_u64_column(metadata, payload).map(DecodedColumn::U64),
+        SchemaValueType::String => Err(CompactError::Unsupported(
+            "cmp3 jsonl column codec is not implemented",
+        )),
+    }
 }
 
 fn parse_rows(input: &str) -> Result<Vec<Map<String, Value>>> {
@@ -216,30 +249,53 @@ fn validate_metadata_against_schema(
 
 fn render_rows(
     columns: &[ColumnSchema],
-    decoded_columns: &[Vec<Option<bool>>],
+    decoded_columns: &[DecodedColumn],
     row_count: usize,
 ) -> Result<String> {
     let mut out = String::new();
 
     for row_index in 0..row_count {
-        let mut row = Map::with_capacity(columns.len());
-        for (column, values) in columns.iter().zip(decoded_columns) {
-            let value = values
-                .get(row_index)
-                .ok_or(CompactError::InvalidInput(
-                    "cmp3 decoded column is shorter than row count",
-                ))?
-                .map_or(Value::Null, Value::Bool);
-            row.insert(column.name.clone(), value);
+        out.push('{');
+        for (index, (column, values)) in columns.iter().zip(decoded_columns).enumerate() {
+            if index > 0 {
+                out.push(',');
+            }
+            out.push_str(
+                &serde_json::to_string(&column.name)
+                    .map_err(|_| CompactError::InvalidInput("json key cannot be serialized"))?,
+            );
+            out.push(':');
+            out.push_str(&values.value_at(row_index)?.to_string());
         }
-        out.push_str(
-            &serde_json::to_string(&row)
-                .map_err(|_| CompactError::InvalidInput("json row cannot be serialized"))?,
-        );
+        out.push('}');
         out.push('\n');
     }
 
     Ok(out)
+}
+
+enum DecodedColumn {
+    Bool(Vec<Option<bool>>),
+    U64(Vec<Option<u64>>),
+}
+
+impl DecodedColumn {
+    fn value_at(&self, row_index: usize) -> Result<Value> {
+        match self {
+            Self::Bool(values) => values
+                .get(row_index)
+                .ok_or(CompactError::InvalidInput(
+                    "cmp3 decoded column is shorter than row count",
+                ))
+                .map(|value| value.map_or(Value::Null, Value::Bool)),
+            Self::U64(values) => values
+                .get(row_index)
+                .ok_or(CompactError::InvalidInput(
+                    "cmp3 decoded column is shorter than row count",
+                ))
+                .map(|value| value.map_or(Value::Null, Value::from)),
+        }
+    }
 }
 
 fn read_exact<'a>(
@@ -416,21 +472,49 @@ columns:
     }
 
     #[test]
-    fn cmp3_boolean_jsonl_rejects_unimplemented_column_types() {
-        let numeric = Schema::from_yaml(
+    fn cmp3_jsonl_roundtrips_boolean_and_numeric_columns() {
+        let mixed = Schema::from_yaml(
             r#"
 columns:
   - name: ts
     type: u64
+    codec: delta_bitpack
+  - name: active
+    type: bool
+    codec: bitmap
+  - name: count
+    type: u64
     codec: bitpack
+    nullable: true
 "#,
         )
         .unwrap();
-        let err = encode_jsonl("{\"ts\":1}\n", &numeric).unwrap_err();
+        let input = "{\"ts\":1000,\"active\":true,\"count\":3}\n{\"ts\":1001,\"active\":false,\"count\":null}\n{\"ts\":1002,\"active\":true}\n";
+        let encoded = encode_jsonl(input, &mixed).unwrap();
+        let decoded = decode_jsonl(&encoded, &mixed).unwrap();
+
+        assert_eq!(
+            decoded,
+            "{\"ts\":1000,\"active\":true,\"count\":3}\n{\"ts\":1001,\"active\":false,\"count\":null}\n{\"ts\":1002,\"active\":true,\"count\":null}\n"
+        );
+    }
+
+    #[test]
+    fn cmp3_jsonl_rejects_unimplemented_string_columns() {
+        let string = Schema::from_yaml(
+            r#"
+columns:
+  - name: message
+    type: string
+    codec: prefix
+"#,
+        )
+        .unwrap();
+        let err = encode_jsonl("{\"message\":\"hello\"}\n", &string).unwrap_err();
 
         assert!(matches!(
             err,
-            CompactError::Unsupported("phase 3 cmp3 jsonl requires bool bitmap columns")
+            CompactError::Unsupported("cmp3 jsonl column codec is not implemented")
         ));
     }
 }

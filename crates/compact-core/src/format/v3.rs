@@ -179,7 +179,10 @@ fn validate_column_metadata(metadata: &ColumnChunkMetadata) -> Result<()> {
     let supported = match metadata.value_type {
         SchemaValueType::U64 => matches!(
             metadata.codec,
-            SchemaCodec::Bitpack | SchemaCodec::DeltaVarintU64 | SchemaCodec::Stored
+            SchemaCodec::Bitpack
+                | SchemaCodec::DeltaBitpack
+                | SchemaCodec::DeltaVarintU64
+                | SchemaCodec::Stored
         ),
         SchemaValueType::String => matches!(
             metadata.codec,
@@ -220,6 +223,7 @@ fn codec_to_id(codec: SchemaCodec) -> u8 {
         SchemaCodec::Auto => 1,
         SchemaCodec::Bitmap => 2,
         SchemaCodec::Bitpack => 3,
+        SchemaCodec::DeltaBitpack => 9,
         SchemaCodec::Dictionary => 4,
         SchemaCodec::DeltaVarintU64 => 5,
         SchemaCodec::Prefix => 6,
@@ -233,6 +237,7 @@ fn id_to_codec(id: u8) -> Result<SchemaCodec> {
         1 => Ok(SchemaCodec::Auto),
         2 => Ok(SchemaCodec::Bitmap),
         3 => Ok(SchemaCodec::Bitpack),
+        9 => Ok(SchemaCodec::DeltaBitpack),
         4 => Ok(SchemaCodec::Dictionary),
         5 => Ok(SchemaCodec::DeltaVarintU64),
         6 => Ok(SchemaCodec::Prefix),

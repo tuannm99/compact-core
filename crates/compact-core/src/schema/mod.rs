@@ -37,6 +37,7 @@ pub enum SchemaCodec {
     Auto,
     Bitmap,
     Bitpack,
+    DeltaBitpack,
     Dictionary,
     DeltaVarintU64,
     Prefix,
@@ -107,6 +108,7 @@ impl Schema {
                     column.codec,
                     SchemaCodec::Auto
                         | SchemaCodec::Bitpack
+                        | SchemaCodec::DeltaBitpack
                         | SchemaCodec::DeltaVarintU64
                         | SchemaCodec::Stored
                 ),

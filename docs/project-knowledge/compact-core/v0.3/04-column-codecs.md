@@ -22,6 +22,22 @@ Compare at least:
 - Delta-bitpack.
 - Stored fixed-width values.
 
+## Implemented Numeric Metadata
+
+The numeric codecs are implemented in
+`crates/compact-core/src/codecs/v3/numeric.rs`.
+
+- `bitpack`: `bit_width: u8`, then `non_null_count: u64`.
+- `delta_bitpack`: `bit_width: u8`, `base: u64`, then
+  `non_null_count: u64`.
+- `delta_varint_u64`: `non_null_count: u64`.
+- `stored`: `non_null_count: u64`, followed by fixed-width little-endian
+  values.
+
+Nullable numeric payloads begin with a validity bitmap. Codec payloads contain
+only non-null values. Delta codecs operate over the non-null sequence and
+require monotonic values.
+
 ## Boolean Bitmap
 
 Boolean values use one value bit per non-null row.
@@ -91,4 +107,3 @@ It still needs unambiguous framing:
 - String: length-prefixed UTF-8 bytes.
 
 Stored payloads remain checksummed by the surrounding block frame.
-
