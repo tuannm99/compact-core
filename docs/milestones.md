@@ -151,6 +151,13 @@ Improve compression ratio with more capable column-aware codecs.
 
 ## v0.4 - Queryable Columnar Format
 
+Status: release-ready pending commit/tag. CMP4 now has a
+footer/index foundation, multi-row-group JSONL encode/decode, column projection,
+basic predicate pushdown over persisted statistics, CLI integration,
+metadata-only inspect, benchmark signals, fuzz target coverage, and release
+notes in [v0.4.md](v0.4.md). Longer fuzz runs and lower-noise Criterion query
+benchmarks are tracked as post-release hardening.
+
 ### Goal
 
 Enable partial reads and query-oriented scans over compressed data.

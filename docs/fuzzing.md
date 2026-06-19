@@ -14,6 +14,17 @@ It feeds arbitrary bytes into:
 compact_core::framing::decode_v1(data)
 ```
 
+The queryable-format targets are:
+
+```text
+fuzz/fuzz_targets/cmp3_decode.rs
+fuzz/fuzz_targets/cmp4_decode.rs
+```
+
+`cmp4_decode` feeds arbitrary bytes into footer inspect, full decode,
+projection decode, and predicate scan paths. The expected behavior is always
+safe return with `Ok` or `Err`; malformed bytes must not panic.
+
 The expected behavior is not successful decoding. The expected behavior is that
 the decoder always returns safely with `Ok` or `Err`.
 
@@ -58,7 +69,8 @@ Run the frame decoder fuzz target:
 
 ```sh
 cargo fuzz run frame_decode
- cargo fuzz run cmp3_decode
+cargo fuzz run cmp3_decode
+cargo fuzz run cmp4_decode
 ```
 
 Let it run for several minutes during normal development. Let it run longer

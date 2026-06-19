@@ -25,6 +25,7 @@ How those concepts are applied in this project:
 - [Rules and reminders](compact-core/04-rules-and-reminders.md)
 - [v0.2 streaming detail](compact-core/streaming/README.md)
 - [v0.3 advanced column compression](compact-core/v0.3/README.md)
+- [v0.4 queryable columnar format](compact-core/v0.4/README.md)
 
 Use the concept files to learn the underlying ideas. Use the `compact-core`
 files when deciding what to build in this repository.

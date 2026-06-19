@@ -6,6 +6,7 @@
 //! inside one outer frame.
 
 pub mod v3;
+pub mod v4;
 
 use std::collections::HashMap;
 

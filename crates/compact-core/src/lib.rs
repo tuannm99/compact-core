@@ -19,6 +19,8 @@ pub const MAGIC_V2: [u8; 4] = *b"CMP2";
 pub const VERSION_V2: u8 = 2;
 pub const MAGIC_V3: [u8; 4] = *b"CMP3";
 pub const VERSION_V3: u8 = 3;
+pub const MAGIC_V4: [u8; 4] = *b"CMP4";
+pub const VERSION_V4: u8 = 4;
 
 pub type Result<T> = std::result::Result<T, CompactError>;
 
@@ -142,13 +144,14 @@ fn ensure_frame_codec(config: &EncodeConfig, actual: Codec) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Codec, CompactError, EncodeConfig, MAGIC_V1, Transform, VERSION_V1, ValueType, checksum32,
-        crate_version, decode_bytes_frame, decode_u64_frame, encode_bytes_frame, encode_u64_frame,
+        Codec, CompactError, EncodeConfig, MAGIC_V1, MAGIC_V4, Transform, VERSION_V1, VERSION_V4,
+        ValueType, checksum32, crate_version, decode_bytes_frame, decode_u64_frame,
+        encode_bytes_frame, encode_u64_frame,
     };
 
     #[test]
     fn version_is_set() {
-        assert_eq!(crate_version(), "0.3.0");
+        assert_eq!(crate_version(), "0.4.0");
     }
 
     #[test]
@@ -161,6 +164,12 @@ mod tests {
     fn format_constants_match_v3() {
         assert_eq!(crate::MAGIC_V3, *b"CMP3");
         assert_eq!(crate::VERSION_V3, 3);
+    }
+
+    #[test]
+    fn format_constants_match_v4() {
+        assert_eq!(MAGIC_V4, *b"CMP4");
+        assert_eq!(VERSION_V4, 4);
     }
 
     #[test]

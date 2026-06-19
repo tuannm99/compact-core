@@ -109,6 +109,39 @@ fn write_v3_fixture(dir: &Path) -> (PathBuf, PathBuf) {
     (input, schema)
 }
 
+fn write_v4_fixture(dir: &Path) -> (PathBuf, PathBuf) {
+    let input = dir.join("v4.jsonl");
+    let schema = dir.join("v4.yml");
+    fs::write(
+        &input,
+        concat!(
+            "{\"id\":1,\"active\":true,\"service\":\"api\"}\n",
+            "{\"id\":2,\"active\":false,\"service\":\"api\"}\n",
+            "{\"id\":10,\"active\":true,\"service\":null}\n",
+            "{\"id\":11,\"active\":false,\"service\":\"worker\"}\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &schema,
+        concat!(
+            "columns:\n",
+            "  - name: id\n",
+            "    type: u64\n",
+            "    codec: delta_bitpack\n",
+            "  - name: active\n",
+            "    type: bool\n",
+            "    codec: bitmap\n",
+            "  - name: service\n",
+            "    type: string\n",
+            "    codec: prefix\n",
+            "    nullable: true\n",
+        ),
+    )
+    .unwrap();
+    (input, schema)
+}
+
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -331,6 +364,108 @@ fn cmp3_cli_roundtrip_inspect_and_bench() {
     ]);
     assert_success(&bench);
     assert!(String::from_utf8_lossy(&bench.stdout).contains("mode: v3"));
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn cmp4_cli_roundtrip_inspect_projection_filter_and_bench() {
+    let dir = temp_case("cmp4");
+    let (input, schema) = write_v4_fixture(&dir);
+    let encoded = dir.join("encoded.cmp4");
+    let decoded = dir.join("decoded.jsonl");
+    let projected = dir.join("projected.jsonl");
+    let filtered = dir.join("filtered.jsonl");
+
+    assert_success(&run(&[
+        "encode",
+        input.to_str().unwrap(),
+        encoded.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+        "--block-rows",
+        "2",
+    ]));
+    assert_success(&run(&[
+        "decode",
+        encoded.to_str().unwrap(),
+        decoded.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+    ]));
+    assert_eq!(fs::read(&decoded).unwrap(), fs::read(&input).unwrap());
+
+    let inspect = run(&["inspect", encoded.to_str().unwrap()]);
+    assert_success(&inspect);
+    let stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(stdout.contains("format: cmp4"));
+    assert!(stdout.contains("row_groups: 2"));
+    assert!(stdout.contains("rows: 4"));
+    assert!(stdout.contains("payload_offset="));
+    assert!(stdout.contains("stats="));
+
+    assert_success(&run(&[
+        "decode",
+        encoded.to_str().unwrap(),
+        projected.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+        "--project",
+        "id,service",
+    ]));
+    assert_eq!(
+        fs::read_to_string(&projected).unwrap(),
+        concat!(
+            "{\"id\":1,\"service\":\"api\"}\n",
+            "{\"id\":2,\"service\":\"api\"}\n",
+            "{\"id\":10,\"service\":null}\n",
+            "{\"id\":11,\"service\":\"worker\"}\n",
+        )
+    );
+
+    assert_success(&run(&[
+        "decode",
+        encoded.to_str().unwrap(),
+        filtered.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+        "--project",
+        "id",
+        "--filter-column",
+        "id",
+        "--filter-op",
+        "ge",
+        "--filter-value",
+        "10",
+    ]));
+    assert_eq!(
+        fs::read_to_string(&filtered).unwrap(),
+        "{\"id\":10}\n{\"id\":11}\n"
+    );
+
+    let bench = run(&[
+        "bench",
+        input.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+        "--block-rows",
+        "2",
+    ]);
+    assert_success(&bench);
+    let stdout = String::from_utf8_lossy(&bench.stdout);
+    assert!(stdout.contains("mode: v4"));
+    assert!(stdout.contains("row_groups: 2"));
+    assert!(stdout.contains("projected_decode_ms:"));
 
     fs::remove_dir_all(dir).ok();
 }

@@ -26,3 +26,10 @@ path = "fuzz_targets/cmp3_decode.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cmp4_decode"
+path = "fuzz_targets/cmp4_decode.rs"
+test = false
+doc = false
+bench = false

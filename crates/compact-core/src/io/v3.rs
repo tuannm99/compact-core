@@ -258,7 +258,7 @@ pub fn inspect_jsonl(data: &[u8]) -> Result<Inspect> {
     })
 }
 
-fn validate_implemented_schema(schema: &Schema) -> Result<&[ColumnSchema]> {
+pub(crate) fn validate_implemented_schema(schema: &Schema) -> Result<&[ColumnSchema]> {
     let columns = schema.supported_columns_v3()?;
 
     for column in columns {
@@ -293,7 +293,10 @@ fn validate_implemented_schema(schema: &Schema) -> Result<&[ColumnSchema]> {
     Ok(columns)
 }
 
-fn encode_column(column: &ColumnSchema, rows: &[Map<String, Value>]) -> Result<EncodedColumnChunk> {
+pub(crate) fn encode_column(
+    column: &ColumnSchema,
+    rows: &[Map<String, Value>],
+) -> Result<EncodedColumnChunk> {
     if column.codec == SchemaCodec::Auto {
         return select_auto_column(column, rows);
     }
@@ -304,7 +307,10 @@ fn encode_column(column: &ColumnSchema, rows: &[Map<String, Value>]) -> Result<E
     }
 }
 
-fn decode_column(metadata: &ColumnChunkMetadata, payload: &[u8]) -> Result<DecodedColumn> {
+pub(crate) fn decode_column(
+    metadata: &ColumnChunkMetadata,
+    payload: &[u8],
+) -> Result<DecodedColumn> {
     validate_statistics(metadata)?;
     let decoded = match metadata.value_type {
         SchemaValueType::Bool => decode_boolean_column(metadata, payload).map(DecodedColumn::Bool),
@@ -422,7 +428,7 @@ fn validate_decoded_statistics(
     Ok(())
 }
 
-fn parse_rows(input: &str) -> Result<Vec<Map<String, Value>>> {
+pub(crate) fn parse_rows(input: &str) -> Result<Vec<Map<String, Value>>> {
     input
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -437,7 +443,7 @@ fn parse_rows(input: &str) -> Result<Vec<Map<String, Value>>> {
         .collect()
 }
 
-fn validate_metadata_against_schema(
+pub(crate) fn validate_metadata_against_schema(
     metadata: &ColumnChunkMetadata,
     column: &ColumnSchema,
     row_count: usize,
@@ -490,14 +496,14 @@ fn render_rows(
     Ok(out)
 }
 
-enum DecodedColumn {
+pub(crate) enum DecodedColumn {
     Bool(Vec<Option<bool>>),
     U64(Vec<Option<u64>>),
     String(Vec<Option<String>>),
 }
 
 impl DecodedColumn {
-    fn value_at(&self, row_index: usize) -> Result<Value> {
+    pub(crate) fn value_at(&self, row_index: usize) -> Result<Value> {
         match self {
             Self::Bool(values) => values
                 .get(row_index)

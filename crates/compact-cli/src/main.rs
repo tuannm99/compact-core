@@ -36,6 +36,14 @@ enum Commands {
         codec: CliCodec,
         #[arg(long)]
         schema: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        filter_column: Option<String>,
+        #[arg(long, value_enum)]
+        filter_op: Option<CliFilterOp>,
+        #[arg(long)]
+        filter_value: Option<u64>,
         #[arg(long, value_enum, default_value_t = CliFormat::V2)]
         format: CliFormat,
     },
@@ -64,6 +72,17 @@ enum CliCodec {
 enum CliFormat {
     V2,
     V3,
+    V4,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CliFilterOp {
+    Eq,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    IsNull,
 }
 
 fn main() -> Result<()> {
@@ -105,6 +124,17 @@ fn main() -> Result<()> {
                         fs::write(&output, encoded)
                             .with_context(|| format!("failed to write {output}"))?;
                     }
+                    CliFormat::V4 => {
+                        let options = cmp4_options(block_rows, block_bytes)
+                            .context("invalid CMP4 options")?;
+                        let input_text = fs::read_to_string(&input)
+                            .with_context(|| format!("failed to read {input} as UTF-8 JSONL"))?;
+                        let encoded =
+                            compact_core::io::v4::encode_jsonl(&input_text, &schema, options)
+                                .context("failed to encode CMP4 JSONL input")?;
+                        fs::write(&output, encoded)
+                            .with_context(|| format!("failed to write {output}"))?;
+                    }
                 }
             } else {
                 let config = codec.byte_config();
@@ -129,6 +159,10 @@ fn main() -> Result<()> {
             output,
             codec,
             schema,
+            project,
+            filter_column,
+            filter_op,
+            filter_value,
             format,
         } => {
             if let Some(schema_path) = schema {
@@ -151,6 +185,25 @@ fn main() -> Result<()> {
                             fs::read(&input).with_context(|| format!("failed to read {input}"))?;
                         let decoded = compact_core::io::v3::decode_jsonl(&encoded, &schema)
                             .context("failed to decode CMP3 JSONL input")?;
+                        fs::write(&output, decoded)
+                            .with_context(|| format!("failed to write {output}"))?;
+                    }
+                    CliFormat::V4 => {
+                        let encoded =
+                            fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+                        let projection = parse_projection(project.as_deref());
+                        let predicate = parse_predicate(filter_column, filter_op, filter_value)
+                            .context("invalid CMP4 filter")?;
+                        let projection_refs =
+                            projection.iter().map(String::as_str).collect::<Vec<_>>();
+                        let decoded = compact_core::io::v4::scan_jsonl(
+                            &encoded,
+                            &schema,
+                            &projection_refs,
+                            predicate.as_ref(),
+                        )
+                        .context("failed to scan CMP4 JSONL input")?
+                        .jsonl;
                         fs::write(&output, decoded)
                             .with_context(|| format!("failed to write {output}"))?;
                     }
@@ -194,6 +247,12 @@ fn main() -> Result<()> {
                 }
                 CliFormat::V3 => compact_core::io::v3::encode_jsonl(&input_text, &schema)
                     .context("failed to encode CMP3 benchmark input")?,
+                CliFormat::V4 => {
+                    let options =
+                        cmp4_options(block_rows, block_bytes).context("invalid CMP4 options")?;
+                    compact_core::io::v4::encode_jsonl(&input_text, &schema, options)
+                        .context("failed to encode CMP4 benchmark input")?
+                }
             };
             let encode_elapsed = encode_start.elapsed();
             let decode_start = Instant::now();
@@ -201,11 +260,14 @@ fn main() -> Result<()> {
                 CliFormat::V2 => compact_core::streaming::decode_jsonl_stream(
                     Cursor::new(&encoded),
                     Vec::new(),
-                    schema,
+                    schema.clone(),
                 )
                 .context("failed to stream decode JSONL benchmark input")?,
                 CliFormat::V3 => compact_core::io::v3::decode_jsonl(&encoded, &schema)
                     .context("failed to decode CMP3 benchmark input")?
+                    .into_bytes(),
+                CliFormat::V4 => compact_core::io::v4::decode_jsonl(&encoded, &schema)
+                    .context("failed to decode CMP4 benchmark input")?
                     .into_bytes(),
             };
             let decode_elapsed = decode_start.elapsed();
@@ -232,6 +294,31 @@ fn main() -> Result<()> {
                     println!("blocks: 1");
                     println!("rows: {}", inspect.row_count);
                 }
+                CliFormat::V4 => {
+                    let footer = compact_core::io::v4::inspect_footer(&encoded)
+                        .context("failed to inspect CMP4 benchmark")?;
+                    let projection_start = Instant::now();
+                    let projection = compact_core::io::v4::decode_jsonl_projected(
+                        &encoded,
+                        &schema,
+                        &schema.columns[0..1]
+                            .iter()
+                            .map(|column| column.name.as_str())
+                            .collect::<Vec<_>>(),
+                    )
+                    .context("failed to run CMP4 projection benchmark")?;
+                    let projection_elapsed = projection_start.elapsed();
+
+                    println!("mode: v4");
+                    println!("row_groups: {}", footer.row_groups.len());
+                    println!("rows: {}", footer.total_row_count);
+                    println!("projected_columns: 1");
+                    println!("projected_bytes: {}", projection.len());
+                    println!(
+                        "projected_decode_ms: {:.3}",
+                        projection_elapsed.as_secs_f64() * 1000.0
+                    );
+                }
             }
             println!("input_bytes: {}", input_bytes);
             println!("encoded_bytes: {}", encoded.len());
@@ -256,13 +343,52 @@ fn main() -> Result<()> {
 }
 
 fn inspect_file(data: &[u8]) -> Result<()> {
-    if data.len() >= 4 && data[0..4] == compact_core::MAGIC_V3 {
+    if data.len() >= 4 && data[0..4] == compact_core::MAGIC_V4 {
+        inspect_v4_file(data)
+    } else if data.len() >= 4 && data[0..4] == compact_core::MAGIC_V3 {
         inspect_v3_file(data)
     } else if data.len() >= 4 && data[0..4] == compact_core::MAGIC_V2 {
         inspect_stream_file(data)
     } else {
         inspect_v1_frame(data)
     }
+}
+
+fn inspect_v4_file(data: &[u8]) -> Result<()> {
+    let footer = compact_core::io::v4::inspect_footer(data).context("failed to inspect CMP4")?;
+    println!("version: {}", compact_core::VERSION_V4);
+    println!("format: cmp4");
+    println!("row_groups: {}", footer.row_groups.len());
+    println!("rows: {}", footer.total_row_count);
+    for row_group in footer.row_groups {
+        println!(
+            "row_group {} first_row={} rows={} offset={} len={} columns={}",
+            row_group.row_group_index,
+            row_group.first_row_index,
+            row_group.row_count,
+            row_group.row_group_offset,
+            row_group.row_group_len,
+            row_group.columns.len()
+        );
+        for column in row_group.columns {
+            let statistics = compact_core::statistics::decode(&column.statistics_metadata)
+                .context("failed to decode CMP4 column statistics")?;
+            println!(
+                "column row_group={} name={} rows={} nulls={} metadata_offset={} metadata_len={} payload_offset={} payload_len={} stats={:?}",
+                row_group.row_group_index,
+                column.name,
+                column.value_count,
+                column.null_count,
+                column.metadata_offset,
+                column.metadata_len,
+                column.payload_offset,
+                column.payload_len,
+                statistics
+            );
+        }
+    }
+
+    Ok(())
 }
 
 fn inspect_v3_file(data: &[u8]) -> Result<()> {
@@ -377,6 +503,57 @@ fn block_options(
             .unwrap_or(defaults.max_uncompressed_bytes_per_block),
     }
     .validate()
+}
+
+fn cmp4_options(
+    block_rows: Option<usize>,
+    block_bytes: Option<usize>,
+) -> Result<compact_core::io::v4::EncodeOptions> {
+    if block_bytes.is_some() {
+        anyhow::bail!("CMP4 currently supports --block-rows but not --block-bytes");
+    }
+
+    Ok(compact_core::io::v4::EncodeOptions {
+        row_group_rows: block_rows
+            .unwrap_or_else(|| compact_core::io::v4::EncodeOptions::default().row_group_rows),
+    })
+}
+
+fn parse_projection(project: Option<&str>) -> Vec<String> {
+    project
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_predicate(
+    filter_column: Option<String>,
+    filter_op: Option<CliFilterOp>,
+    filter_value: Option<u64>,
+) -> Result<Option<compact_core::io::v4::Predicate>> {
+    match (filter_column, filter_op, filter_value) {
+        (None, None, None) => Ok(None),
+        (Some(column), Some(CliFilterOp::IsNull), None) => {
+            Ok(Some(compact_core::io::v4::Predicate::IsNull { column }))
+        }
+        (Some(column), Some(op), Some(value)) => {
+            let op = match op {
+                CliFilterOp::Eq => compact_core::io::v4::U64PredicateOp::Eq(value),
+                CliFilterOp::Lt => compact_core::io::v4::U64PredicateOp::Lt(value),
+                CliFilterOp::Le => compact_core::io::v4::U64PredicateOp::Le(value),
+                CliFilterOp::Gt => compact_core::io::v4::U64PredicateOp::Gt(value),
+                CliFilterOp::Ge => compact_core::io::v4::U64PredicateOp::Ge(value),
+                CliFilterOp::IsNull => anyhow::bail!("is-null filter must not include a value"),
+            };
+            Ok(Some(compact_core::io::v4::Predicate::U64 { column, op }))
+        }
+        _ => anyhow::bail!(
+            "filter requires --filter-column and --filter-op; u64 filters also require --filter-value"
+        ),
+    }
 }
 
 fn print_ratio(input_len: u64, output_len: u64) {
