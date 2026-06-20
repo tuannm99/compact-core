@@ -166,7 +166,7 @@ fn decode_stored(data: &[u8], count: usize) -> Result<Vec<String>> {
     let mut cursor = 0;
     let mut values = Vec::with_capacity(count);
     for _ in 0..count {
-        let len = read_varint(data, &mut cursor)?;
+        let len = varint::read_u64(data, &mut cursor)?;
         let len = usize::try_from(len)
             .map_err(|_| CompactError::InvalidInput("cmp3 string length is too large"))?;
         let bytes = read_exact(data, &mut cursor, len)?;
@@ -210,9 +210,9 @@ fn decode_prefix(data: &[u8], count: usize) -> Result<Vec<String>> {
     let mut previous = Vec::new();
     let mut values = Vec::with_capacity(count);
     for _ in 0..count {
-        let prefix = usize::try_from(read_varint(data, &mut cursor)?)
+        let prefix = usize::try_from(varint::read_u64(data, &mut cursor)?)
             .map_err(|_| CompactError::InvalidInput("cmp3 prefix length is too large"))?;
-        let suffix_len = usize::try_from(read_varint(data, &mut cursor)?)
+        let suffix_len = usize::try_from(varint::read_u64(data, &mut cursor)?)
             .map_err(|_| CompactError::InvalidInput("cmp3 suffix length is too large"))?;
         if prefix > previous.len() {
             return Err(CompactError::InvalidInput(
@@ -265,7 +265,7 @@ fn encode_dictionary(values: &[String]) -> Result<Vec<u8>> {
 
 fn decode_dictionary(data: &[u8], count: usize) -> Result<Vec<String>> {
     let mut cursor = 0;
-    let dictionary_count = usize::try_from(read_varint(data, &mut cursor)?)
+    let dictionary_count = usize::try_from(varint::read_u64(data, &mut cursor)?)
         .map_err(|_| CompactError::InvalidInput("cmp3 dictionary is too large"))?;
     if dictionary_count > MAX_DICTIONARY_ENTRIES {
         return Err(CompactError::InvalidInput(
@@ -274,7 +274,7 @@ fn decode_dictionary(data: &[u8], count: usize) -> Result<Vec<String>> {
     }
     let mut dictionary = Vec::with_capacity(dictionary_count);
     for _ in 0..dictionary_count {
-        let len = usize::try_from(read_varint(data, &mut cursor)?)
+        let len = usize::try_from(varint::read_u64(data, &mut cursor)?)
             .map_err(|_| CompactError::InvalidInput("cmp3 string length is too large"))?;
         let bytes = read_exact(data, &mut cursor, len)?;
         dictionary.push(
@@ -354,21 +354,6 @@ fn validate_metadata(metadata: &ColumnChunkMetadata, payload: &[u8]) -> Result<(
         ));
     }
     Ok(())
-}
-
-fn read_varint(data: &[u8], cursor: &mut usize) -> Result<u64> {
-    let start = *cursor;
-    while *cursor < data.len() {
-        let byte = data[*cursor];
-        *cursor += 1;
-        if byte & 0x80 == 0 {
-            return varint::decode_u64(&data[start..*cursor])?
-                .first()
-                .copied()
-                .ok_or(CompactError::InvalidInput("truncated varint"));
-        }
-    }
-    Err(CompactError::InvalidInput("truncated varint"))
 }
 
 fn read_exact<'a>(data: &'a [u8], cursor: &mut usize, len: usize) -> Result<&'a [u8]> {

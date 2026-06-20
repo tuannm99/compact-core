@@ -75,6 +75,43 @@ pub fn decode_u64(data: &[u8]) -> Result<Vec<u64>, CompactError> {
     Ok(out)
 }
 
+/// Decode one canonical base-128 varint from `data` at `cursor`.
+///
+/// The cursor advances past exactly one integer. This is the primitive to use
+/// when a format interleaves varints with byte sections and cannot decode the
+/// whole remaining slice as one homogeneous integer stream.
+pub fn read_u64(data: &[u8], cursor: &mut usize) -> Result<u64, CompactError> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    let mut bytes_read = 0usize;
+
+    while let Some(&byte) = data.get(*cursor) {
+        *cursor += 1;
+        bytes_read += 1;
+
+        let part = (byte & 0x7f) as u64;
+        if shift == 63 && (part > 1 || byte & 0x80 != 0) {
+            return Err(CompactError::InvalidInput("varint overflow"));
+        }
+        if shift > 63 {
+            return Err(CompactError::InvalidInput("varint overflow"));
+        }
+
+        value |= part << shift;
+
+        if byte & 0x80 == 0 {
+            if bytes_read != encoded_len(value) {
+                return Err(CompactError::InvalidInput("overlong varint"));
+            }
+            return Ok(value);
+        }
+
+        shift += 7;
+    }
+
+    Err(CompactError::InvalidInput("truncated varint"))
+}
+
 fn encoded_len(mut value: u64) -> usize {
     let mut len = 1;
 
@@ -88,7 +125,7 @@ fn encoded_len(mut value: u64) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_u64, encode_u64};
+    use super::{decode_u64, encode_u64, read_u64};
     use crate::CompactError;
 
     #[test]
@@ -155,6 +192,27 @@ mod tests {
         let decoded = decode_u64(&encoded).unwrap();
 
         assert_eq!(decoded, vec![0, 1, 127, 128, 300, u32::MAX as u64]);
+    }
+
+    #[test]
+    fn read_u64_advances_cursor_one_value_at_a_time() {
+        let encoded = encode_u64(&[127, 128, 300]);
+        let mut cursor = 0;
+
+        assert_eq!(read_u64(&encoded, &mut cursor).unwrap(), 127);
+        assert_eq!(cursor, 1);
+        assert_eq!(read_u64(&encoded, &mut cursor).unwrap(), 128);
+        assert_eq!(cursor, 3);
+        assert_eq!(read_u64(&encoded, &mut cursor).unwrap(), 300);
+        assert_eq!(cursor, encoded.len());
+    }
+
+    #[test]
+    fn read_u64_rejects_malformed_single_value() {
+        let mut cursor = 0;
+        let err = read_u64(&[0x80, 0x00], &mut cursor).unwrap_err();
+
+        assert!(matches!(err, CompactError::InvalidInput("overlong varint")));
     }
 
     #[test]

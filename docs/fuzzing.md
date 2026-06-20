@@ -19,11 +19,16 @@ The queryable-format targets are:
 ```text
 fuzz/fuzz_targets/cmp3_decode.rs
 fuzz/fuzz_targets/cmp4_decode.rs
+fuzz/fuzz_targets/search_decode.rs
 ```
 
 `cmp4_decode` feeds arbitrary bytes into footer inspect, full decode,
 projection decode, and predicate scan paths. The expected behavior is always
 safe return with `Ok` or `Err`; malformed bytes must not panic.
+
+`search_decode` feeds arbitrary bytes into PST1 posting-list decode, TRM1
+dictionary decode, term lookup, docID seek, and query helper paths. Search
+payloads are untrusted file bytes too, so malformed data must never panic.
 
 The expected behavior is not successful decoding. The expected behavior is that
 the decoder always returns safely with `Ok` or `Err`.
@@ -71,6 +76,7 @@ Run the frame decoder fuzz target:
 cargo fuzz run frame_decode
 cargo fuzz run cmp3_decode
 cargo fuzz run cmp4_decode
+cargo fuzz run search_decode
 ```
 
 Let it run for several minutes during normal development. Let it run longer

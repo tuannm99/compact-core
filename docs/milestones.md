@@ -151,12 +151,12 @@ Improve compression ratio with more capable column-aware codecs.
 
 ## v0.4 - Queryable Columnar Format
 
-Status: release-ready pending commit/tag. CMP4 now has a
-footer/index foundation, multi-row-group JSONL encode/decode, column projection,
-basic predicate pushdown over persisted statistics, CLI integration,
-metadata-only inspect, benchmark signals, fuzz target coverage, and release
-notes in [v0.4.md](v0.4.md). Longer fuzz runs and lower-noise Criterion query
-benchmarks are tracked as post-release hardening.
+Status: released as v0.4.0. CMP4 has a footer/index foundation,
+multi-row-group JSONL encode/decode, column projection, basic predicate pushdown
+over persisted statistics, CLI integration, metadata-only inspect, benchmark
+signals, fuzz target coverage, and release notes in [v0.4.md](v0.4.md). Longer
+fuzz runs and lower-noise Criterion query benchmarks are tracked as
+post-release hardening.
 
 ### Goal
 
@@ -191,6 +191,16 @@ Enable partial reads and query-oriented scans over compressed data.
 - Scan API is stable
 
 ## v0.5 - Search Engine Compression Integration
+
+Status: release-ready pending commit/tag. `search::postings` provides a checked
+posting-list payload with delta-varint docIDs, delta-varint positions,
+serialized skip metadata, metadata inspect, and seek-by-docID over the skip
+table. `search::dictionary` adds reusable sorted term blocks with binary lookup.
+`search::query` adds single-term lookup, AND intersection, adjacent phrase
+checks, top-k term-frequency ranking, and term/docID containment. CLI
+integration covers encode, inspect, lookup, seek, and benchmark signals. Fuzz
+coverage includes search decode and query paths. Release notes are documented in
+[v0.5.md](v0.5.md).
 
 ### Goal
 

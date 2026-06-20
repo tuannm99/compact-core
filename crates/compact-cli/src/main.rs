@@ -61,6 +61,34 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = CliFormat::V2)]
         format: CliFormat,
     },
+    SearchEncode {
+        input: String,
+        output: String,
+        #[arg(long, default_value_t = 16)]
+        skip_step: usize,
+    },
+    SearchInspect {
+        input: String,
+    },
+    SearchLookup {
+        input: String,
+        #[arg(long)]
+        term: String,
+    },
+    SearchSeek {
+        input: String,
+        #[arg(long)]
+        term: String,
+        #[arg(long)]
+        doc_id: u64,
+    },
+    SearchBench {
+        input: String,
+        #[arg(long, default_value_t = 16)]
+        skip_step: usize,
+        #[arg(long, default_value_t = 5)]
+        top_k: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -337,6 +365,110 @@ fn main() -> Result<()> {
                 mib_per_second(input_bytes, decode_elapsed.as_secs_f64())
             );
         }
+        Commands::SearchEncode {
+            input,
+            output,
+            skip_step,
+        } => {
+            let input_text = fs::read_to_string(&input)
+                .with_context(|| format!("failed to read {input} as UTF-8 search postings"))?;
+            let entries = parse_search_postings(&input_text)?;
+            let encoded = compact_core::search::dictionary::encode_dictionary(&entries, skip_step)
+                .context("failed to encode search dictionary")?;
+            fs::write(&output, encoded).with_context(|| format!("failed to write {output}"))?;
+
+            let input_len = fs::metadata(&input)
+                .with_context(|| format!("failed to stat {input}"))?
+                .len();
+            let output_len = fs::metadata(&output)
+                .with_context(|| format!("failed to stat {output}"))?
+                .len();
+            print_ratio(input_len, output_len);
+        }
+        Commands::SearchInspect { input } => {
+            let encoded = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            inspect_search_dictionary(&encoded)?;
+        }
+        Commands::SearchLookup { input, term } => {
+            let encoded = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let postings = compact_core::search::dictionary::lookup_term(&encoded, &term)
+                .context("failed to lookup search term")?
+                .unwrap_or_default();
+            println!("term: {term}");
+            println!("documents: {}", postings.len());
+            for posting in postings {
+                println!(
+                    "doc id={} freq={} positions={}",
+                    posting.doc_id,
+                    posting.positions.len(),
+                    join_u64s(&posting.positions)
+                );
+            }
+        }
+        Commands::SearchSeek {
+            input,
+            term,
+            doc_id,
+        } => {
+            let encoded = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            match compact_core::search::dictionary::seek_term_doc(&encoded, &term, doc_id)
+                .context("failed to seek search term/docID")?
+            {
+                Some(posting) => {
+                    println!("found: true");
+                    println!("term: {term}");
+                    println!("doc_id: {}", posting.doc_id);
+                    println!("frequency: {}", posting.positions.len());
+                    println!("positions: {}", join_u64s(&posting.positions));
+                }
+                None => println!("found: false"),
+            }
+        }
+        Commands::SearchBench {
+            input,
+            skip_step,
+            top_k,
+        } => {
+            let input_text = fs::read_to_string(&input)
+                .with_context(|| format!("failed to read {input} as UTF-8 search postings"))?;
+            let input_bytes = input_text.len() as u64;
+            let entries = parse_search_postings(&input_text)?;
+
+            let encode_start = Instant::now();
+            let encoded = compact_core::search::dictionary::encode_dictionary(&entries, skip_step)
+                .context("failed to encode search benchmark dictionary")?;
+            let encode_elapsed = encode_start.elapsed();
+
+            let inspect_start = Instant::now();
+            let index = compact_core::search::dictionary::inspect_dictionary(&encoded)
+                .context("failed to inspect search benchmark dictionary")?;
+            let inspect_elapsed = inspect_start.elapsed();
+
+            let terms = index
+                .entries
+                .iter()
+                .map(|entry| entry.term.as_str())
+                .collect::<Vec<_>>();
+            let top_k_start = Instant::now();
+            let top_hits =
+                compact_core::search::query::top_k_by_term_frequency(&encoded, &terms, top_k)
+                    .context("failed to run search top-k benchmark")?;
+            let top_k_elapsed = top_k_start.elapsed();
+
+            println!("mode: search");
+            println!("terms: {}", index.term_count);
+            println!("postings_bytes: {}", index.postings_bytes);
+            println!("input_bytes: {}", input_bytes);
+            println!("encoded_bytes: {}", encoded.len());
+            println!(
+                "compression_ratio: {:.4}",
+                compression_ratio(input_bytes, encoded.len() as u64)
+            );
+            println!("encode_ms: {:.3}", encode_elapsed.as_secs_f64() * 1000.0);
+            println!("inspect_ms: {:.3}", inspect_elapsed.as_secs_f64() * 1000.0);
+            println!("top_k: {}", top_hits.len());
+            println!("top_k_ms: {:.3}", top_k_elapsed.as_secs_f64() * 1000.0);
+        }
     }
 
     Ok(())
@@ -554,6 +686,95 @@ fn parse_predicate(
             "filter requires --filter-column and --filter-op; u64 filters also require --filter-value"
         ),
     }
+}
+
+fn parse_search_postings(
+    input: &str,
+) -> Result<Vec<compact_core::search::dictionary::TermPostingList>> {
+    let mut terms =
+        std::collections::BTreeMap::<String, Vec<compact_core::search::postings::Posting>>::new();
+
+    for (line_index, line) in input.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let mut fields = line.split_whitespace();
+        let term = fields
+            .next()
+            .with_context(|| format!("line {} is missing term", line_index + 1))?;
+        let doc_id = fields
+            .next()
+            .with_context(|| format!("line {} is missing doc_id", line_index + 1))?
+            .parse::<u64>()
+            .with_context(|| format!("line {} has invalid doc_id", line_index + 1))?;
+        let positions = fields
+            .next()
+            .map(parse_positions)
+            .transpose()
+            .with_context(|| format!("line {} has invalid positions", line_index + 1))?
+            .unwrap_or_default();
+
+        if fields.next().is_some() {
+            anyhow::bail!("line {} has too many fields", line_index + 1);
+        }
+
+        terms
+            .entry(term.to_owned())
+            .or_default()
+            .push(compact_core::search::postings::Posting { doc_id, positions });
+    }
+
+    let entries = terms
+        .into_iter()
+        .map(|(term, mut postings)| {
+            postings.sort_by_key(|posting| posting.doc_id);
+            compact_core::search::dictionary::TermPostingList { term, postings }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(entries)
+}
+
+fn parse_positions(input: &str) -> Result<Vec<u64>> {
+    if input == "-" {
+        return Ok(Vec::new());
+    }
+
+    input
+        .split(',')
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .with_context(|| format!("invalid position {value}"))
+        })
+        .collect()
+}
+
+fn inspect_search_dictionary(data: &[u8]) -> Result<()> {
+    let index = compact_core::search::dictionary::inspect_dictionary(data)
+        .context("failed to inspect search dictionary")?;
+    println!("format: search");
+    println!("terms: {}", index.term_count);
+    println!("postings_bytes: {}", index.postings_bytes);
+
+    for entry in index.entries {
+        println!(
+            "term {} docs={} postings_offset={} postings_len={}",
+            entry.term, entry.doc_count, entry.postings_offset, entry.postings_len
+        );
+    }
+
+    Ok(())
+}
+
+fn join_u64s(values: &[u64]) -> String {
+    values
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn print_ratio(input_len: u64, output_len: u64) {
