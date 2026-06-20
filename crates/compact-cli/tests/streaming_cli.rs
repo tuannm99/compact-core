@@ -469,3 +469,72 @@ fn cmp4_cli_roundtrip_inspect_projection_filter_and_bench() {
 
     fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn search_cli_encodes_inspects_queries_and_benchmarks_dictionary() {
+    let dir = temp_case("search");
+    let input = dir.join("search.txt");
+    let encoded = dir.join("search.cmp");
+    fs::write(
+        &input,
+        concat!(
+            "brown 1 1\n",
+            "brown 3 4,8\n",
+            "fox 1 2,9\n",
+            "fox 2 1\n",
+            "fox 3 5\n",
+            "quick 1 0\n",
+        ),
+    )
+    .unwrap();
+
+    let encode = run(&[
+        "search-encode",
+        input.to_str().unwrap(),
+        encoded.to_str().unwrap(),
+        "--skip-step",
+        "2",
+    ]);
+    assert_success(&encode);
+
+    let inspect = run(&["search-inspect", encoded.to_str().unwrap()]);
+    assert_success(&inspect);
+    let stdout = String::from_utf8_lossy(&inspect.stdout);
+    assert!(stdout.contains("format: search"));
+    assert!(stdout.contains("terms: 3"));
+    assert!(stdout.contains("term fox docs=3"));
+
+    let lookup = run(&["search-lookup", encoded.to_str().unwrap(), "--term", "fox"]);
+    assert_success(&lookup);
+    let stdout = String::from_utf8_lossy(&lookup.stdout);
+    assert!(stdout.contains("documents: 3"));
+    assert!(stdout.contains("doc id=1 freq=2 positions=2,9"));
+
+    let seek = run(&[
+        "search-seek",
+        encoded.to_str().unwrap(),
+        "--term",
+        "fox",
+        "--doc-id",
+        "3",
+    ]);
+    assert_success(&seek);
+    let stdout = String::from_utf8_lossy(&seek.stdout);
+    assert!(stdout.contains("found: true"));
+    assert!(stdout.contains("positions: 5"));
+
+    let bench = run(&[
+        "search-bench",
+        input.to_str().unwrap(),
+        "--skip-step",
+        "2",
+        "--top-k",
+        "2",
+    ]);
+    assert_success(&bench);
+    let stdout = String::from_utf8_lossy(&bench.stdout);
+    assert!(stdout.contains("mode: search"));
+    assert!(stdout.contains("top_k_ms:"));
+
+    fs::remove_dir_all(dir).ok();
+}

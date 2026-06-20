@@ -553,7 +553,7 @@ fn decode_string_values(payload: &[u8]) -> Result<Vec<String>> {
     let mut values = Vec::new();
 
     while cursor < raw.len() {
-        let len = read_varint_u64(&raw, &mut cursor)?;
+        let len = varint::read_u64(&raw, &mut cursor)?;
         let len = usize::try_from(len)
             .map_err(|_| CompactError::InvalidInput("string length is too large"))?;
         let bytes = read_exact(&raw, &mut cursor, len, "string payload is truncated")?;
@@ -568,12 +568,12 @@ fn decode_string_values(payload: &[u8]) -> Result<Vec<String>> {
 
 fn decode_dictionary_values(payload: &[u8]) -> Result<Vec<String>> {
     let mut cursor = 0usize;
-    let dictionary_len = usize::try_from(read_varint_u64(payload, &mut cursor)?)
+    let dictionary_len = usize::try_from(varint::read_u64(payload, &mut cursor)?)
         .map_err(|_| CompactError::InvalidInput("dictionary length is too large"))?;
     let mut dictionary = Vec::with_capacity(dictionary_len);
 
     for _ in 0..dictionary_len {
-        let len = usize::try_from(read_varint_u64(payload, &mut cursor)?)
+        let len = usize::try_from(varint::read_u64(payload, &mut cursor)?)
             .map_err(|_| CompactError::InvalidInput("string length is too large"))?;
         let bytes = read_exact(payload, &mut cursor, len, "dictionary string is truncated")?;
         let value = std::str::from_utf8(bytes)
@@ -594,26 +594,6 @@ fn decode_dictionary_values(payload: &[u8]) -> Result<Vec<String>> {
     }
 
     Ok(values)
-}
-
-fn read_varint_u64(data: &[u8], cursor: &mut usize) -> Result<u64> {
-    let start = *cursor;
-
-    while *cursor < data.len() {
-        let byte = data[*cursor];
-        *cursor += 1;
-
-        if byte & 0x80 == 0 {
-            let decoded = varint::decode_u64(&data[start..*cursor])?;
-
-            return decoded
-                .first()
-                .copied()
-                .ok_or(CompactError::InvalidInput("truncated varint"));
-        }
-    }
-
-    Err(CompactError::InvalidInput("truncated varint"))
 }
 
 fn render_json_object(columns: &[DecodedColumn], row_index: usize) -> Result<String> {
