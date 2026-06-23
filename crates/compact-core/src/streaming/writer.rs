@@ -47,14 +47,45 @@ impl<W: Write> JsonlBlockWriter<W> {
         writer.write_all(&[STREAM_FLAGS])?;
         writer.write_all(&STREAM_HEADER_LEN.to_le_bytes())?;
 
+        Self::new_with_state(writer, schema, options, 0, 0, FILE_HEADER_LEN)
+    }
+
+    pub(crate) fn resume_without_header(
+        writer: W,
+        schema: Schema,
+        options: BlockOptions,
+        blocks_written: u64,
+        rows_written: u64,
+        bytes_written: u64,
+    ) -> Result<Self> {
+        let options = options.validate()?;
+
+        Self::new_with_state(
+            writer,
+            schema,
+            options,
+            blocks_written,
+            rows_written,
+            bytes_written,
+        )
+    }
+
+    fn new_with_state(
+        writer: W,
+        schema: Schema,
+        options: BlockOptions,
+        blocks_written: u64,
+        rows_written: u64,
+        bytes_written: u64,
+    ) -> Result<Self> {
         Ok(Self {
             writer,
             schema,
             options,
             current: RowGroupBuffer::default(),
-            blocks_written: 0,
-            rows_written: 0,
-            bytes_written: FILE_HEADER_LEN,
+            blocks_written,
+            rows_written,
+            bytes_written,
             metadata: Vec::new(),
         })
     }
@@ -137,6 +168,16 @@ impl<W: Write> JsonlBlockWriter<W> {
     pub fn finish(mut self) -> Result<W> {
         self.flush_block()?;
         write_index_footer(&mut self.writer, &self.metadata)?;
+
+        Ok(self.writer)
+    }
+
+    /// Flush remaining rows without writing an `IDX1` footer.
+    ///
+    /// Append-oriented streams intentionally remain open-ended. A footer would
+    /// mark the logical end of a v0.2 file and make later appends ambiguous.
+    pub(crate) fn finish_without_footer(mut self) -> Result<W> {
+        self.flush_block()?;
 
         Ok(self.writer)
     }

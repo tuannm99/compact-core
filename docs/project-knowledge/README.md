@@ -27,6 +27,7 @@ How those concepts are applied in this project:
 - [v0.3 advanced column compression](compact-core/v0.3/README.md)
 - [v0.4 queryable columnar format](compact-core/v0.4/README.md)
 - [v0.5 search engine compression](compact-core/v0.5/README.md)
+- [v0.6 real-time streaming integration](compact-core/v0.6/README.md)
 
 Use the concept files to learn the underlying ideas. Use the `compact-core`
 files when deciding what to build in this repository.

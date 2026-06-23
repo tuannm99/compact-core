@@ -15,6 +15,10 @@ Reserved for Criterion benchmarks:
 - v0.5 term/docID seek latency
 - v0.5 AND query latency
 - v0.5 top-k term-frequency scan latency
+- v0.6 append stream throughput
+- v0.6 append recovery latency
+- v0.6 replay throughput
+- v0.6 snapshot compression ratio
 
 Current v0.4 query signals are exposed through the CLI benchmark command:
 
@@ -34,3 +38,12 @@ compact search-bench postings.txt --skip-step 16 --top-k 5
 
 The input format is documented in
 `docs/project-knowledge/compact-core/v0.5/05-testing-and-benchmarks.md`.
+
+Current v0.6 append-stream signals are exposed through:
+
+```sh
+compact stream-bench input.jsonl --schema schema.yml --block-rows 10000
+```
+
+It reports append throughput, recovery latency, replay throughput, encoded
+bytes, and compression ratio.

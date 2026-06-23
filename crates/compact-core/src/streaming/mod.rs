@@ -14,14 +14,23 @@ use std::io::{BufRead, Read, Write};
 use crate::Result;
 use crate::schema::Schema;
 
+pub mod append;
 pub mod metadata;
 pub mod options;
 pub mod reader;
+pub mod rolling;
+pub mod snapshot;
 pub mod writer;
 
+pub use append::{
+    AppendRecovery, JsonlAppendWriter, append_jsonl_stream, recover_append_stream,
+    replay_jsonl_append_stream,
+};
 pub use metadata::BlockMetadata;
 pub use options::BlockOptions;
 pub use reader::{DecodedBlock, JsonlBlockReader, StreamInspect, inspect_jsonl_stream};
+pub use rolling::{RollingOptions, roll_jsonl_append_segments};
+pub use snapshot::{Snapshot, decode_snapshot, encode_snapshot};
 pub use writer::JsonlBlockWriter;
 
 /// Magic for a v0.2 block payload inside a framed stream.

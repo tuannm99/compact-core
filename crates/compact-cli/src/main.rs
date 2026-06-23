@@ -89,6 +89,58 @@ enum Commands {
         #[arg(long, default_value_t = 5)]
         top_k: usize,
     },
+    StreamAppend {
+        input: String,
+        output: String,
+        #[arg(long)]
+        schema: String,
+        #[arg(long)]
+        block_rows: Option<usize>,
+        #[arg(long)]
+        block_bytes: Option<usize>,
+    },
+    StreamRecover {
+        input: String,
+    },
+    StreamReplay {
+        input: String,
+        output: String,
+        #[arg(long)]
+        schema: String,
+    },
+    StreamRoll {
+        input: String,
+        output_dir: String,
+        #[arg(long)]
+        schema: String,
+        #[arg(long)]
+        block_rows: Option<usize>,
+        #[arg(long)]
+        block_bytes: Option<usize>,
+        #[arg(long, default_value_t = 64 * 1024 * 1024)]
+        max_segment_bytes: usize,
+        #[arg(long, default_value_t = 1024)]
+        max_blocks: usize,
+    },
+    StreamBench {
+        input: String,
+        #[arg(long)]
+        schema: String,
+        #[arg(long)]
+        block_rows: Option<usize>,
+        #[arg(long)]
+        block_bytes: Option<usize>,
+    },
+    SnapshotEncode {
+        input: String,
+        output: String,
+        #[arg(long)]
+        checkpoint_id: u64,
+    },
+    SnapshotDecode {
+        input: String,
+        output: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -469,6 +521,161 @@ fn main() -> Result<()> {
             println!("top_k: {}", top_hits.len());
             println!("top_k_ms: {:.3}", top_k_elapsed.as_secs_f64() * 1000.0);
         }
+        Commands::StreamAppend {
+            input,
+            output,
+            schema,
+            block_rows,
+            block_bytes,
+        } => {
+            let schema = load_schema(&schema)?;
+            let options = block_options(block_rows, block_bytes)
+                .context("invalid append stream block options")?;
+            let existing = fs::read(&output).unwrap_or_default();
+            let input_file =
+                fs::File::open(&input).with_context(|| format!("failed to open {input}"))?;
+            let encoded = compact_core::streaming::append_jsonl_stream(
+                &existing,
+                BufReader::new(input_file),
+                schema,
+                options,
+            )
+            .context("failed to append JSONL stream")?;
+            fs::write(&output, encoded).with_context(|| format!("failed to write {output}"))?;
+        }
+        Commands::StreamRecover { input } => {
+            let data = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            inspect_append_recovery(&data)?;
+        }
+        Commands::StreamReplay {
+            input,
+            output,
+            schema,
+        } => {
+            let schema = load_schema(&schema)?;
+            let data = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let decoded =
+                compact_core::streaming::replay_jsonl_append_stream(&data, Vec::new(), schema)
+                    .context("failed to replay append stream")?;
+            fs::write(&output, decoded).with_context(|| format!("failed to write {output}"))?;
+        }
+        Commands::StreamRoll {
+            input,
+            output_dir,
+            schema,
+            block_rows,
+            block_bytes,
+            max_segment_bytes,
+            max_blocks,
+        } => {
+            let schema = load_schema(&schema)?;
+            let options = block_options(block_rows, block_bytes)
+                .context("invalid rolling stream block options")?;
+            let rolling = compact_core::streaming::RollingOptions {
+                max_segment_bytes,
+                max_blocks_per_segment: max_blocks,
+            }
+            .validate()
+            .context("invalid rolling options")?;
+            let input_file =
+                fs::File::open(&input).with_context(|| format!("failed to open {input}"))?;
+            let segments = compact_core::streaming::roll_jsonl_append_segments(
+                BufReader::new(input_file),
+                schema,
+                options,
+                rolling,
+            )
+            .context("failed to roll append stream segments")?;
+
+            fs::create_dir_all(&output_dir)
+                .with_context(|| format!("failed to create {output_dir}"))?;
+            for (index, segment) in segments.iter().enumerate() {
+                let path = format!("{output_dir}/segment-{index:05}.cmp");
+                fs::write(&path, segment).with_context(|| format!("failed to write {path}"))?;
+            }
+            println!("segments: {}", segments.len());
+        }
+        Commands::StreamBench {
+            input,
+            schema,
+            block_rows,
+            block_bytes,
+        } => {
+            let schema = load_schema(&schema)?;
+            let options = block_options(block_rows, block_bytes)
+                .context("invalid append benchmark block options")?;
+            let input_text = fs::read_to_string(&input)
+                .with_context(|| format!("failed to read {input} as UTF-8 JSONL"))?;
+            let input_bytes = input_text.len() as u64;
+
+            let append_start = Instant::now();
+            let encoded = compact_core::streaming::append_jsonl_stream(
+                &[],
+                Cursor::new(input_text.as_bytes()),
+                schema.clone(),
+                options,
+            )
+            .context("failed to append benchmark JSONL")?;
+            let append_elapsed = append_start.elapsed();
+
+            let recovery_start = Instant::now();
+            let recovery = compact_core::streaming::recover_append_stream(&encoded)
+                .context("failed to recover benchmark append stream")?;
+            let recovery_elapsed = recovery_start.elapsed();
+
+            let replay_start = Instant::now();
+            let decoded =
+                compact_core::streaming::replay_jsonl_append_stream(&encoded, Vec::new(), schema)
+                    .context("failed to replay benchmark append stream")?;
+            let replay_elapsed = replay_start.elapsed();
+
+            if decoded != input_text.as_bytes() {
+                anyhow::bail!("append benchmark roundtrip mismatch");
+            }
+
+            println!("mode: append-stream");
+            println!("blocks: {}", recovery.blocks.len());
+            println!("rows: {}", recovery.total_rows);
+            println!("input_bytes: {}", input_bytes);
+            println!("encoded_bytes: {}", encoded.len());
+            println!(
+                "compression_ratio: {:.4}",
+                compression_ratio(input_bytes, encoded.len() as u64)
+            );
+            println!("append_ms: {:.3}", append_elapsed.as_secs_f64() * 1000.0);
+            println!(
+                "recovery_ms: {:.3}",
+                recovery_elapsed.as_secs_f64() * 1000.0
+            );
+            println!("replay_ms: {:.3}", replay_elapsed.as_secs_f64() * 1000.0);
+            println!(
+                "append_mib_s: {:.3}",
+                mib_per_second(input_bytes, append_elapsed.as_secs_f64())
+            );
+            println!(
+                "replay_mib_s: {:.3}",
+                mib_per_second(input_bytes, replay_elapsed.as_secs_f64())
+            );
+        }
+        Commands::SnapshotEncode {
+            input,
+            output,
+            checkpoint_id,
+        } => {
+            let state = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let encoded = compact_core::streaming::encode_snapshot(checkpoint_id, &state)
+                .context("failed to encode snapshot")?;
+            fs::write(&output, encoded).with_context(|| format!("failed to write {output}"))?;
+            print_ratio(state.len() as u64, fs::metadata(&output)?.len());
+        }
+        Commands::SnapshotDecode { input, output } => {
+            let encoded = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let snapshot = compact_core::streaming::decode_snapshot(&encoded)
+                .context("failed to decode snapshot")?;
+            fs::write(&output, snapshot.state)
+                .with_context(|| format!("failed to write {output}"))?;
+            println!("checkpoint_id: {}", snapshot.checkpoint_id);
+        }
     }
 
     Ok(())
@@ -568,6 +775,34 @@ fn inspect_stream_file(data: &[u8]) -> Result<()> {
     );
 
     for block in inspect.blocks {
+        println!(
+            "block {} offset={} rows={} raw={} compressed={} checksum={:08x}",
+            block.block_index,
+            block.encoded_offset,
+            block.row_count,
+            block.uncompressed_size,
+            block.compressed_size,
+            block.checksum
+        );
+    }
+
+    Ok(())
+}
+
+fn inspect_append_recovery(data: &[u8]) -> Result<()> {
+    let recovery = compact_core::streaming::recover_append_stream(data)
+        .context("failed to recover append stream")?;
+    println!("format: append-stream");
+    println!("valid_len: {}", recovery.valid_len);
+    println!("blocks: {}", recovery.blocks.len());
+    println!("total_rows: {}", recovery.total_rows);
+    println!("total_raw_bytes: {}", recovery.total_uncompressed_size);
+    println!("total_compressed_bytes: {}", recovery.total_compressed_size);
+    println!(
+        "truncated_or_corrupt_tail: {}",
+        recovery.truncated_or_corrupt_tail
+    );
+    for block in recovery.blocks {
         println!(
             "block {} offset={} rows={} raw={} compressed={} checksum={:08x}",
             block.block_index,

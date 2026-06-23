@@ -538,3 +538,112 @@ fn search_cli_encodes_inspects_queries_and_benchmarks_dictionary() {
 
     fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn append_stream_cli_recovers_replays_rolls_benchmarks_and_snapshots() {
+    let dir = temp_case("append");
+    let input_a = dir.join("a.jsonl");
+    let input_b = dir.join("b.jsonl");
+    let schema = dir.join("schema.yml");
+    let append = dir.join("append.cmp");
+    let replayed = dir.join("replayed.jsonl");
+    let rolled = dir.join("rolled");
+    let state = dir.join("state.bin");
+    let snapshot = dir.join("state.snp");
+    let restored = dir.join("restored.bin");
+
+    fs::write(&input_a, "{\"ts\":100}\n{\"ts\":101}\n").unwrap();
+    fs::write(&input_b, "{\"ts\":102}\n").unwrap();
+    fs::write(
+        &schema,
+        "columns:\n  - name: ts\n    type: u64\n    codec: delta_varint_u64\n",
+    )
+    .unwrap();
+
+    assert_success(&run(&[
+        "stream-append",
+        input_a.to_str().unwrap(),
+        append.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--block-rows",
+        "1",
+    ]));
+    assert_success(&run(&[
+        "stream-append",
+        input_b.to_str().unwrap(),
+        append.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--block-rows",
+        "1",
+    ]));
+
+    let recover = run(&["stream-recover", append.to_str().unwrap()]);
+    assert_success(&recover);
+    let stdout = String::from_utf8_lossy(&recover.stdout);
+    assert!(stdout.contains("format: append-stream"));
+    assert!(stdout.contains("blocks: 3"));
+    assert!(stdout.contains("total_rows: 3"));
+    assert!(stdout.contains("truncated_or_corrupt_tail: false"));
+
+    assert_success(&run(&[
+        "stream-replay",
+        append.to_str().unwrap(),
+        replayed.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+    ]));
+    assert_eq!(
+        fs::read_to_string(&replayed).unwrap(),
+        "{\"ts\":100}\n{\"ts\":101}\n{\"ts\":102}\n"
+    );
+
+    let roll = run(&[
+        "stream-roll",
+        replayed.to_str().unwrap(),
+        rolled.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--block-rows",
+        "1",
+        "--max-blocks",
+        "2",
+    ]);
+    assert_success(&roll);
+    assert!(rolled.join("segment-00000.cmp").exists());
+    assert!(rolled.join("segment-00001.cmp").exists());
+
+    let bench = run(&[
+        "stream-bench",
+        replayed.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--block-rows",
+        "1",
+    ]);
+    assert_success(&bench);
+    let stdout = String::from_utf8_lossy(&bench.stdout);
+    assert!(stdout.contains("mode: append-stream"));
+    assert!(stdout.contains("append_mib_s:"));
+    assert!(stdout.contains("replay_mib_s:"));
+
+    fs::write(&state, b"aaaaaaaaabbbbbbbbb").unwrap();
+    assert_success(&run(&[
+        "snapshot-encode",
+        state.to_str().unwrap(),
+        snapshot.to_str().unwrap(),
+        "--checkpoint-id",
+        "42",
+    ]));
+    let decode = run(&[
+        "snapshot-decode",
+        snapshot.to_str().unwrap(),
+        restored.to_str().unwrap(),
+    ]);
+    assert_success(&decode);
+    assert_eq!(fs::read(&restored).unwrap(), fs::read(&state).unwrap());
+    assert!(String::from_utf8_lossy(&decode.stdout).contains("checkpoint_id: 42"));
+
+    fs::remove_dir_all(dir).ok();
+}

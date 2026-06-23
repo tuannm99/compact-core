@@ -233,6 +233,15 @@ Adapt the format and codecs for search-index compression workloads.
 
 ## v0.6 - Real-time Streaming Integration
 
+Status: implemented pending release hardening. `streaming::append` adds
+append-oriented JSONL streams that reuse CMP2 block frames without writing the
+closing `IDX1` footer. Recovery scans to the last fully valid block, reports
+valid prefix length, and supports replay and append-after-corrupt-tail behavior.
+`streaming::snapshot` adds checked checkpoint snapshots. `streaming::rolling`
+adds block-boundary segment rolling. CLI commands cover append, recover, replay,
+roll, benchmark, snapshot encode, and snapshot decode. Kafka-style integration
+is documented in [v0.6-kafka-style.md](examples/v0.6-kafka-style.md).
+
 ### Goal
 
 Support append-oriented streaming systems and checkpoint-style persistence.
