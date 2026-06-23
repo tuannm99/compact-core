@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn version_is_set() {
-        assert_eq!(crate_version(), "0.5.0");
+        assert_eq!(crate_version(), "0.6.0");
     }
 
     #[test]
