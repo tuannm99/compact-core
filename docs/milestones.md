@@ -276,6 +276,15 @@ Support append-oriented streaming systems and checkpoint-style persistence.
 
 ## v0.7 - FFI + Multi-language SDK
 
+Status: release-ready pending commit/tag. The C ABI exposes version/status
+helpers, Rust-owned byte buffers, explicit buffer freeing, and in-memory RLE
+byte encode/decode. Go bindings wrap the C ABI byte APIs. Python provides a
+standard-library `ctypes` wrapper over the C ABI. Node provides a
+dependency-free CLI-backed wrapper with the same high-level API shape. Memory
+ownership is documented in [ffi.md](ffi.md), and cross-language smoke coverage
+is scripted in `scripts/cross_language_smoke.sh`. Release notes are documented
+in [v0.7.md](v0.7.md).
+
 ### Goal
 
 Expose the format safely across multiple language runtimes.

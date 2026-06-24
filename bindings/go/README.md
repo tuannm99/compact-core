@@ -15,4 +15,10 @@ package compact
 
 func EncodeFile(input, schema, output string) error
 func DecodeFile(input, schema, output string) error
+func Version() string
+func EncodeBytesRLE(input []byte) ([]byte, error)
+func DecodeBytesRLE(input []byte) ([]byte, error)
 ```
+
+Byte buffers returned by Rust are copied into Go memory and released with
+`compact_buffer_free` before the Go function returns.
