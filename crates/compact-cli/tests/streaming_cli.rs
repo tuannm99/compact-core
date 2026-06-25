@@ -255,6 +255,36 @@ fn bench_reports_streaming_metrics() {
 }
 
 #[test]
+fn parallel_bench_reports_scaling_metrics() {
+    let dir = temp_case("parallel-bench");
+    let (input, schema) = write_generated_fixture(&dir, 16);
+
+    let bench = run(&[
+        "parallel-bench",
+        input.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--workers",
+        "2",
+        "--block-rows",
+        "2",
+    ]);
+    assert_success(&bench);
+    let stdout = String::from_utf8_lossy(&bench.stdout);
+
+    assert!(stdout.contains("mode: parallel"));
+    assert!(stdout.contains("workers: 2"));
+    assert!(stdout.contains("block_rows: 2"));
+    assert!(stdout.contains("blocks: 8"));
+    assert!(stdout.contains("parallel_encode_mib_s:"));
+    assert!(stdout.contains("parallel_decode_mib_s:"));
+    assert!(stdout.contains("encode_speedup:"));
+    assert!(stdout.contains("decode_speedup:"));
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn invalid_block_options_fail_before_writing_success() {
     let dir = temp_case("invalid-options");
     let (input, schema) = write_fixture(&dir);

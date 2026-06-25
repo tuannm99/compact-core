@@ -12,7 +12,7 @@ use crate::schema::Schema;
 use crate::streaming::{BLOCK_MAGIC_V1, BlockMetadata, INDEX_MAGIC_V1};
 use crate::{Codec, CompactError, MAGIC_V1, MAGIC_V2, Result, VERSION_V2, framing};
 
-const STREAM_HEADER_LEN: usize = 4 + 1 + 1 + 4;
+pub(crate) const STREAM_HEADER_LEN: usize = 4 + 1 + 1 + 4;
 const FRAME_HEADER_LEN: usize = 4 + 1 + 1 + 8 + 4;
 const FRAME_PAYLOAD_LEN_OFFSET: usize = 4 + 1 + 1;
 const INDEX_COUNT_LEN: usize = 8;
@@ -208,7 +208,7 @@ pub fn inspect_jsonl_stream<R: Read>(mut reader: R) -> Result<StreamInspect> {
     })
 }
 
-fn validate_stream_header<R: Read>(reader: &mut R) -> Result<()> {
+pub(crate) fn validate_stream_header<R: Read>(reader: &mut R) -> Result<()> {
     let mut header = [0u8; STREAM_HEADER_LEN];
     read_exact_invalid(reader, &mut header, "stream header is truncated")?;
 
@@ -236,13 +236,13 @@ fn validate_stream_header<R: Read>(reader: &mut R) -> Result<()> {
     Ok(())
 }
 
-enum StreamRecord {
+pub(crate) enum StreamRecord {
     Frame(Vec<u8>),
     Index(Vec<BlockMetadata>),
     Eof,
 }
 
-fn read_next_record_from<R: Read>(reader: &mut R) -> Result<StreamRecord> {
+pub(crate) fn read_next_record_from<R: Read>(reader: &mut R) -> Result<StreamRecord> {
     let Some(magic) = read_next_magic(reader)? else {
         return Ok(StreamRecord::Eof);
     };
@@ -333,15 +333,15 @@ fn read_index_footer_after_magic<R: Read>(reader: &mut R) -> Result<Vec<BlockMet
     Ok(blocks)
 }
 
-struct ParsedBlockPayload<'a> {
-    block_index: u64,
-    first_row_index: u64,
-    row_count: usize,
-    raw_size: usize,
-    column_block: &'a [u8],
+pub(crate) struct ParsedBlockPayload<'a> {
+    pub(crate) block_index: u64,
+    pub(crate) first_row_index: u64,
+    pub(crate) row_count: usize,
+    pub(crate) raw_size: usize,
+    pub(crate) column_block: &'a [u8],
 }
 
-fn parse_block_payload(payload: &[u8]) -> Result<ParsedBlockPayload<'_>> {
+pub(crate) fn parse_block_payload(payload: &[u8]) -> Result<ParsedBlockPayload<'_>> {
     let mut cursor = 0usize;
     let magic = read_slice(
         payload,
@@ -443,7 +443,7 @@ fn read_u32(data: &[u8], cursor: &mut usize, err: &'static str) -> Result<u32> {
     ))
 }
 
-fn count_jsonl_rows(jsonl: &str) -> usize {
+pub(crate) fn count_jsonl_rows(jsonl: &str) -> usize {
     jsonl.lines().filter(|line| !line.trim().is_empty()).count()
 }
 
@@ -451,7 +451,7 @@ fn u64_to_usize(value: u64, err: &'static str) -> Result<usize> {
     usize::try_from(value).map_err(|_| CompactError::InvalidInput(err))
 }
 
-fn usize_to_u64(value: usize, err: &'static str) -> Result<u64> {
+pub(crate) fn usize_to_u64(value: usize, err: &'static str) -> Result<u64> {
     u64::try_from(value).map_err(|_| CompactError::InvalidInput(err))
 }
 

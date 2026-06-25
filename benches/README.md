@@ -47,3 +47,19 @@ compact stream-bench input.jsonl --schema schema.yml --block-rows 10000
 
 It reports append throughput, recovery latency, replay throughput, encoded
 bytes, and compression ratio.
+
+Current v0.8 parallel encode scaling signals are exposed through:
+
+```sh
+compact parallel-bench input.jsonl --schema schema.yml --workers 4 --block-rows 10000
+```
+
+It compares sequential CMP2 encode throughput with the v0.8 parallel block
+encoder, verifies the parallel output decodes back to the original JSONL, and
+reports speedup. The v0.8 release benchmark used 5,000,000 generated rows
+(`260,500,000` input bytes), 500 CMP2 blocks, and 16 workers. It produced
+`121,594,522` encoded bytes, `6.288x` encode speedup, and `2.956x` decode
+speedup versus the sequential CMP2 path on the same run.
+
+For the full run/test/report procedure, see
+[`docs/v0.8-benchmark-guide.md`](../docs/v0.8-benchmark-guide.md).

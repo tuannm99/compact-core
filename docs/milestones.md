@@ -317,6 +317,13 @@ Expose the format safely across multiple language runtimes.
 
 ## v0.8 - Parallel Compression Engine
 
+Status: release-ready pending commit/tag. `compact_core::parallel` provides
+CMP2-compatible parallel JSONL encode and decode with worker pools, ordered
+collectors, checked thread-safe options, stress roundtrips, a runtime-agnostic
+async writer contract, and CLI `parallel-bench` scaling signals. Release notes
+and published 5,000,000-row benchmark numbers are documented in
+[v0.8.md](v0.8.md).
+
 ### Goal
 
 Scale throughput across CPU cores without sacrificing ordering or safety.

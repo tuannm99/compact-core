@@ -14,7 +14,7 @@ use crate::{Codec, CompactError, MAGIC_V2, Result, VERSION_V2, framing};
 
 const STREAM_FLAGS: u8 = 0;
 const STREAM_HEADER_LEN: u32 = 0;
-const FILE_HEADER_LEN: u64 = 4 + 1 + 1 + 4;
+pub(crate) const FILE_HEADER_LEN: u64 = 4 + 1 + 1 + 4;
 
 /// Streaming JSONL writer for the v0.2 block format.
 ///
@@ -42,10 +42,7 @@ impl<W: Write> JsonlBlockWriter<W> {
     pub fn new(mut writer: W, schema: Schema, options: BlockOptions) -> Result<Self> {
         let options = options.validate()?;
 
-        writer.write_all(&MAGIC_V2)?;
-        writer.write_all(&[VERSION_V2])?;
-        writer.write_all(&[STREAM_FLAGS])?;
-        writer.write_all(&STREAM_HEADER_LEN.to_le_bytes())?;
+        write_stream_header(&mut writer)?;
 
         Self::new_with_state(writer, schema, options, 0, 0, FILE_HEADER_LEN)
     }
@@ -235,7 +232,7 @@ impl RowGroupBuffer {
     }
 }
 
-fn normalize_jsonl_line(line: &str) -> Result<String> {
+pub(crate) fn normalize_jsonl_line(line: &str) -> Result<String> {
     let line = line.strip_suffix('\n').unwrap_or(line);
     let line = line.strip_suffix('\r').unwrap_or(line);
 
@@ -252,7 +249,7 @@ fn normalize_jsonl_line(line: &str) -> Result<String> {
     Ok(normalized)
 }
 
-fn encode_block_payload(
+pub(crate) fn encode_block_payload(
     block_index: u64,
     first_row_index: u64,
     row_count: usize,
@@ -279,7 +276,10 @@ fn usize_to_u64(value: usize, err: &'static str) -> Result<u64> {
     u64::try_from(value).map_err(|_| CompactError::InvalidInput(err))
 }
 
-fn write_index_footer<W: Write>(writer: &mut W, metadata: &[BlockMetadata]) -> Result<()> {
+pub(crate) fn write_index_footer<W: Write>(
+    writer: &mut W,
+    metadata: &[BlockMetadata],
+) -> Result<()> {
     let block_count = usize_to_u64(metadata.len(), "block index has too many blocks")?;
 
     writer.write_all(&INDEX_MAGIC_V1)?;
@@ -292,6 +292,15 @@ fn write_index_footer<W: Write>(writer: &mut W, metadata: &[BlockMetadata]) -> R
         writer.write_all(&block.compressed_size.to_le_bytes())?;
         writer.write_all(&block.checksum.to_le_bytes())?;
     }
+
+    Ok(())
+}
+
+pub(crate) fn write_stream_header<W: Write>(writer: &mut W) -> Result<()> {
+    writer.write_all(&MAGIC_V2)?;
+    writer.write_all(&[VERSION_V2])?;
+    writer.write_all(&[STREAM_FLAGS])?;
+    writer.write_all(&STREAM_HEADER_LEN.to_le_bytes())?;
 
     Ok(())
 }

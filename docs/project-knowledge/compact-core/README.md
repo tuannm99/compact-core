@@ -13,6 +13,7 @@ This folder explains how the general concepts are applied inside
 - [v0.5 search engine compression](v0.5/README.md)
 - [v0.6 real-time streaming integration](v0.6/README.md)
 - [v0.7 FFI and multi-language SDK](v0.7/README.md)
+- [v0.8 parallel compression engine](v0.8/README.md)
 
 Keep repo-specific decisions here. Keep reusable concepts in
 [`../concepts`](../concepts/README.md).

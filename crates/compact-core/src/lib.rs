@@ -6,6 +6,7 @@ pub mod codecs;
 pub mod format;
 pub mod framing;
 pub mod io;
+pub mod parallel;
 pub mod pipeline;
 pub mod primitives;
 pub mod schema;
@@ -152,7 +153,7 @@ mod tests {
 
     #[test]
     fn version_is_set() {
-        assert_eq!(crate_version(), "0.7.0");
+        assert_eq!(crate_version(), "0.8.0");
     }
 
     #[test]

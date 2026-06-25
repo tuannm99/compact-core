@@ -61,6 +61,17 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = CliFormat::V2)]
         format: CliFormat,
     },
+    ParallelBench {
+        input: String,
+        #[arg(long)]
+        schema: String,
+        #[arg(long)]
+        workers: Option<usize>,
+        #[arg(long)]
+        block_rows: Option<usize>,
+        #[arg(long)]
+        block_bytes: Option<usize>,
+    },
     SearchEncode {
         input: String,
         output: String,
@@ -415,6 +426,132 @@ fn main() -> Result<()> {
             println!(
                 "decode_mib_s: {:.3}",
                 mib_per_second(input_bytes, decode_elapsed.as_secs_f64())
+            );
+        }
+        Commands::ParallelBench {
+            input,
+            schema,
+            workers,
+            block_rows,
+            block_bytes,
+        } => {
+            let schema = load_schema(&schema)?;
+            let input_text = fs::read_to_string(&input)
+                .with_context(|| format!("failed to read {input} as UTF-8 JSONL"))?;
+            let input_bytes = input_text.len() as u64;
+            let block_options =
+                block_options(block_rows, block_bytes).context("invalid parallel block options")?;
+            let worker_count = workers.unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(usize::from)
+                    .unwrap_or(1)
+            });
+
+            let sequential_start = Instant::now();
+            let sequential = compact_core::streaming::encode_jsonl_stream(
+                BufReader::new(Cursor::new(input_text.as_bytes())),
+                Vec::new(),
+                schema.clone(),
+                block_options,
+            )
+            .context("failed to run sequential CMP2 benchmark")?;
+            let sequential_elapsed = sequential_start.elapsed();
+
+            let parallel_start = Instant::now();
+            let parallel = compact_core::parallel::encode_jsonl_stream_parallel(
+                BufReader::new(Cursor::new(input_text.as_bytes())),
+                Vec::new(),
+                schema.clone(),
+                compact_core::parallel::ParallelOptions {
+                    worker_count,
+                    block_options,
+                },
+            )
+            .context("failed to run parallel CMP2 benchmark")?;
+            let parallel_elapsed = parallel_start.elapsed();
+
+            let sequential_decode_start = Instant::now();
+            let sequential_decoded = compact_core::streaming::decode_jsonl_stream(
+                Cursor::new(&parallel),
+                Vec::new(),
+                schema.clone(),
+            )
+            .context("failed to sequentially decode parallel benchmark output")?;
+            let sequential_decode_elapsed = sequential_decode_start.elapsed();
+
+            let parallel_decode_start = Instant::now();
+            let parallel_decoded = compact_core::parallel::decode_jsonl_stream_parallel(
+                Cursor::new(&parallel),
+                Vec::new(),
+                schema,
+                compact_core::parallel::ParallelDecodeOptions { worker_count },
+            )
+            .context("failed to parallel decode benchmark output")?;
+            let parallel_decode_elapsed = parallel_decode_start.elapsed();
+
+            if sequential_decoded != input_text.as_bytes()
+                || parallel_decoded != input_text.as_bytes()
+            {
+                anyhow::bail!("parallel benchmark roundtrip mismatch");
+            }
+
+            let inspect = compact_core::streaming::inspect_stream(Cursor::new(&parallel))
+                .context("failed to inspect parallel benchmark output")?;
+            println!("mode: parallel");
+            println!("workers: {}", worker_count);
+            println!("block_rows: {}", block_options.max_rows_per_block);
+            println!(
+                "block_bytes: {}",
+                block_options.max_uncompressed_bytes_per_block
+            );
+            println!("blocks: {}", inspect.blocks.len());
+            println!("rows: {}", inspect.total_rows);
+            println!("input_bytes: {}", input_bytes);
+            println!("sequential_encoded_bytes: {}", sequential.len());
+            println!("parallel_encoded_bytes: {}", parallel.len());
+            println!(
+                "compression_ratio: {:.4}",
+                compression_ratio(input_bytes, parallel.len() as u64)
+            );
+            println!(
+                "sequential_encode_ms: {:.3}",
+                sequential_elapsed.as_secs_f64() * 1000.0
+            );
+            println!(
+                "parallel_encode_ms: {:.3}",
+                parallel_elapsed.as_secs_f64() * 1000.0
+            );
+            println!(
+                "sequential_encode_mib_s: {:.3}",
+                mib_per_second(input_bytes, sequential_elapsed.as_secs_f64())
+            );
+            println!(
+                "parallel_encode_mib_s: {:.3}",
+                mib_per_second(input_bytes, parallel_elapsed.as_secs_f64())
+            );
+            println!(
+                "sequential_decode_ms: {:.3}",
+                sequential_decode_elapsed.as_secs_f64() * 1000.0
+            );
+            println!(
+                "parallel_decode_ms: {:.3}",
+                parallel_decode_elapsed.as_secs_f64() * 1000.0
+            );
+            println!(
+                "sequential_decode_mib_s: {:.3}",
+                mib_per_second(input_bytes, sequential_decode_elapsed.as_secs_f64())
+            );
+            println!(
+                "parallel_decode_mib_s: {:.3}",
+                mib_per_second(input_bytes, parallel_decode_elapsed.as_secs_f64())
+            );
+            println!(
+                "encode_speedup: {:.3}",
+                sequential_elapsed.as_secs_f64() / parallel_elapsed.as_secs_f64()
+            );
+            println!(
+                "decode_speedup: {:.3}",
+                sequential_decode_elapsed.as_secs_f64() / parallel_decode_elapsed.as_secs_f64()
             );
         }
         Commands::SearchEncode {
