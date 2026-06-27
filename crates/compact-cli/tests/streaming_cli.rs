@@ -229,6 +229,196 @@ fn inspect_reports_streaming_block_metadata() {
 }
 
 #[test]
+fn validate_reports_valid_file_and_rejects_corruption() {
+    let dir = temp_case("validate");
+    let (input, schema) = write_v4_fixture(&dir);
+    let encoded = dir.join("encoded.cmp");
+
+    let encode = run(&[
+        "encode",
+        input.to_str().unwrap(),
+        encoded.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+        "--block-rows",
+        "2",
+    ]);
+    assert_success(&encode);
+
+    let validate = run(&["validate", encoded.to_str().unwrap()]);
+    assert_success(&validate);
+    let stdout = String::from_utf8_lossy(&validate.stdout);
+    assert!(stdout.contains("valid: true"));
+    assert!(stdout.contains("format: CMP4"));
+    assert!(stdout.contains("storage_units: 2"));
+    assert!(stdout.contains("rows: 4"));
+
+    let mut bytes = fs::read(&encoded).unwrap();
+    bytes[32] ^= 0xff;
+    fs::write(&encoded, bytes).unwrap();
+    let corrupted = run(&["validate", encoded.to_str().unwrap()]);
+    assert_failure(&corrupted);
+    assert!(
+        String::from_utf8_lossy(&corrupted.stderr).contains("cmp4 row group checksum mismatch")
+    );
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn schema_check_and_evolved_decode_apply_compatible_revision() {
+    let dir = temp_case("schema-evolution");
+    let (input, schema) = write_v4_fixture(&dir);
+    let encoded = dir.join("encoded.cmp");
+    let decoded = dir.join("evolved.jsonl");
+    let writer_revision = dir.join("writer-revision.yml");
+    let reader_revision = dir.join("reader-revision.yml");
+    fs::write(
+        &writer_revision,
+        concat!(
+            "revision: 1\n",
+            "columns:\n",
+            "  - {stable_id: 1, name: id, type: u64, codec: delta_bitpack}\n",
+            "  - {stable_id: 2, name: active, type: bool, codec: bitmap}\n",
+            "  - {stable_id: 3, name: service, type: string, codec: prefix, nullable: true}\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        &reader_revision,
+        concat!(
+            "revision: 2\n",
+            "columns:\n",
+            "  - {stable_id: 1, name: event_id, type: u64, codec: bitpack, aliases: [id]}\n",
+            "  - {stable_id: 4, name: region, type: string, codec: stored, nullable: true}\n",
+            "  - {stable_id: 5, name: source, type: string, codec: stored, default: compact}\n",
+        ),
+    )
+    .unwrap();
+
+    assert_success(&run(&[
+        "encode",
+        input.to_str().unwrap(),
+        encoded.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+    ]));
+
+    let check = run(&[
+        "schema-check",
+        writer_revision.to_str().unwrap(),
+        reader_revision.to_str().unwrap(),
+    ]);
+    assert_success(&check);
+    assert!(String::from_utf8_lossy(&check.stdout).contains("compatible: true"));
+
+    let evolve = run(&[
+        "evolve-decode",
+        encoded.to_str().unwrap(),
+        decoded.to_str().unwrap(),
+        "--writer-schema",
+        writer_revision.to_str().unwrap(),
+        "--reader-schema",
+        reader_revision.to_str().unwrap(),
+    ]);
+    assert_success(&evolve);
+    let rows = fs::read_to_string(decoded).unwrap();
+    assert!(rows.contains(r#""event_id":1"#));
+    assert!(rows.contains(r#""region":null"#));
+    assert!(rows.contains(r#""source":"compact""#));
+    assert!(!rows.contains("service"));
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn repair_dry_run_and_copy_on_write_recover_cmp2_prefix() {
+    let dir = temp_case("repair");
+    let (input, schema) = write_fixture(&dir);
+    let append = dir.join("append.cmp");
+    let repaired = dir.join("repaired.cmp");
+
+    assert_success(&run(&[
+        "stream-append",
+        input.to_str().unwrap(),
+        append.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--block-rows",
+        "1",
+    ]));
+    let mut bytes = fs::read(&append).unwrap();
+    *bytes.last_mut().unwrap() ^= 0xff;
+    fs::write(&append, bytes).unwrap();
+
+    let dry_run = run(&["repair", append.to_str().unwrap(), "--dry-run"]);
+    assert_success(&dry_run);
+    let stdout = String::from_utf8_lossy(&dry_run.stdout);
+    assert!(stdout.contains("action: TruncateTailAndRebuildFooter"));
+    assert!(stdout.contains("recovered_units: 2"));
+
+    let repair = run(&[
+        "repair",
+        append.to_str().unwrap(),
+        "--output",
+        repaired.to_str().unwrap(),
+    ]);
+    assert_success(&repair);
+    assert_ne!(fs::read(&append).unwrap(), fs::read(&repaired).unwrap());
+
+    let validate = run(&["validate", repaired.to_str().unwrap()]);
+    assert_success(&validate);
+    assert!(String::from_utf8_lossy(&validate.stdout).contains("footer_index: true"));
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn repair_rebuilds_damaged_cmp4_footer() {
+    let dir = temp_case("repair-cmp4");
+    let (input, schema) = write_v4_fixture(&dir);
+    let encoded = dir.join("damaged.cmp");
+    let repaired = dir.join("repaired.cmp");
+
+    assert_success(&run(&[
+        "encode",
+        input.to_str().unwrap(),
+        encoded.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+        "--block-rows",
+        "2",
+    ]));
+    let mut bytes = fs::read(&encoded).unwrap();
+    *bytes.last_mut().unwrap() ^= 0xff;
+    fs::write(&encoded, bytes).unwrap();
+
+    let repair = run(&[
+        "repair",
+        encoded.to_str().unwrap(),
+        "--output",
+        repaired.to_str().unwrap(),
+    ]);
+    assert_success(&repair);
+    let stdout = String::from_utf8_lossy(&repair.stdout);
+    assert!(stdout.contains("format: CMP4"));
+    assert!(stdout.contains("recovered_units: 2"));
+    assert!(stdout.contains("recovered_rows: 4"));
+
+    let validate = run(&["validate", repaired.to_str().unwrap()]);
+    assert_success(&validate);
+    assert!(String::from_utf8_lossy(&validate.stdout).contains("rows: 4"));
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn bench_reports_streaming_metrics() {
     let dir = temp_case("bench");
     let (input, schema) = write_fixture(&dir);

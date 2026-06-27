@@ -50,6 +50,32 @@ enum Commands {
     Inspect {
         input: String,
     },
+    /// Validate storage structure and checksums without decoding user data.
+    Validate {
+        input: String,
+    },
+    /// Check whether files written with one schema revision are readable by another.
+    SchemaCheck {
+        writer_schema: String,
+        reader_schema: String,
+    },
+    /// Decode a columnar file and apply a checked schema evolution plan.
+    EvolveDecode {
+        input: String,
+        output: String,
+        #[arg(long)]
+        writer_schema: String,
+        #[arg(long)]
+        reader_schema: String,
+    },
+    /// Plan or execute copy-on-write repair for a recoverable storage file.
+    Repair {
+        input: String,
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
     Bench {
         input: String,
         #[arg(long)]
@@ -311,6 +337,89 @@ fn main() -> Result<()> {
         Commands::Inspect { input } => {
             let frame = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
             inspect_file(&frame)?;
+        }
+        Commands::Validate { input } => {
+            let file = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let report =
+                compact_core::storage::validate(&file).context("storage validation failed")?;
+
+            println!("valid: true");
+            println!("format: {}", report.format);
+            println!("version: {}", report.format.version());
+            println!("file_bytes: {}", report.file_size);
+            println!("storage_units: {}", report.storage_units);
+            if let Some(total_rows) = report.total_rows {
+                println!("rows: {total_rows}");
+            }
+            if let Some(has_footer_index) = report.has_footer_index {
+                println!("footer_index: {has_footer_index}");
+            }
+        }
+        Commands::SchemaCheck {
+            writer_schema,
+            reader_schema,
+        } => {
+            let writer = load_schema_revision(&writer_schema)?;
+            let reader = load_schema_revision(&reader_schema)?;
+            let assessment = compact_core::schema::evolution::assess(&writer, &reader)
+                .context("failed to assess schema evolution")?;
+
+            println!("writer_revision: {}", assessment.writer_revision);
+            println!("reader_revision: {}", assessment.reader_revision);
+            println!("compatible: {}", assessment.is_compatible());
+            println!("actions: {}", assessment.actions.len());
+            for action in &assessment.actions {
+                println!("action: {action:?}");
+            }
+            for issue in &assessment.issues {
+                println!("issue: {issue:?}");
+            }
+            if !assessment.is_compatible() {
+                anyhow::bail!("schema revisions are incompatible");
+            }
+        }
+        Commands::EvolveDecode {
+            input,
+            output,
+            writer_schema,
+            reader_schema,
+        } => {
+            let file = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let writer = load_schema_revision(&writer_schema)?;
+            let reader = load_schema_revision(&reader_schema)?;
+            let decoded = compact_core::schema::evolution::decode_jsonl(&file, &writer, &reader)
+                .context("failed to decode with schema evolution")?;
+
+            fs::write(&output, decoded).with_context(|| format!("failed to write {output}"))?;
+        }
+        Commands::Repair {
+            input,
+            output,
+            dry_run,
+        } => {
+            let source = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let plan =
+                compact_core::storage::repair::plan(&source).context("file is not repairable")?;
+
+            println!("format: {}", plan.format);
+            println!("action: {:?}", plan.action);
+            println!("source_bytes: {}", plan.source_len);
+            println!("recoverable_bytes: {}", plan.recoverable_len);
+            println!("discarded_bytes: {}", plan.discarded_bytes);
+            println!("recovered_units: {}", plan.recovered_units);
+            println!("recovered_rows: {}", plan.recovered_rows);
+
+            if !dry_run {
+                let output =
+                    output.context("--output is required unless --dry-run is specified")?;
+                if output == input {
+                    anyhow::bail!("repair output must differ from input");
+                }
+                let repaired = compact_core::storage::repair::execute(&source, &plan)
+                    .context("failed to execute repair plan")?;
+                fs::write(&output, repaired)
+                    .with_context(|| format!("failed to write repaired file {output}"))?;
+            }
         }
         Commands::Bench {
             input,
@@ -993,6 +1102,13 @@ fn load_schema(path: &str) -> Result<compact_core::schema::Schema> {
     let data = fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
 
     compact_core::schema::Schema::from_yaml(&data).context("failed to parse schema")
+}
+
+fn load_schema_revision(path: &str) -> Result<compact_core::schema::evolution::SchemaRevision> {
+    let data = fs::read_to_string(path).with_context(|| format!("failed to read {path}"))?;
+
+    compact_core::schema::evolution::SchemaRevision::from_yaml(&data)
+        .context("failed to parse schema revision")
 }
 
 fn block_options(

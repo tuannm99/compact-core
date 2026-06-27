@@ -12,6 +12,7 @@ pub mod primitives;
 pub mod schema;
 pub mod search;
 pub mod statistics;
+pub mod storage;
 pub mod streaming;
 mod transforms;
 

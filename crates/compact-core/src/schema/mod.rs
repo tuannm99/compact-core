@@ -2,6 +2,8 @@ use serde::Deserialize;
 
 use crate::{Codec, CompactError, Result, Transform, ValueType};
 
+pub mod evolution;
+
 /// Declarative schema shared by the stable CMP2 path and the CMP3 planner.
 ///
 /// Call [`Schema::supported_columns`] before using a schema with CMP2 and

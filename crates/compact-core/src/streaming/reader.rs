@@ -148,6 +148,16 @@ pub fn inspect_jsonl_stream<R: Read>(mut reader: R) -> Result<StreamInspect> {
         let frame = match read_next_record_from(&mut reader)? {
             StreamRecord::Frame(frame) => frame,
             StreamRecord::Index(index) => {
+                let mut trailing = [0u8; 1];
+                match reader.read(&mut trailing) {
+                    Ok(0) => {}
+                    Ok(_) => {
+                        return Err(CompactError::InvalidInput(
+                            "stream has trailing bytes after footer index",
+                        ));
+                    }
+                    Err(error) => return Err(CompactError::Io(error)),
+                }
                 footer_index = Some(index);
                 break;
             }
@@ -647,6 +657,19 @@ columns:
         assert!(matches!(
             err,
             CompactError::InvalidInput("footer index does not match scanned blocks")
+        ));
+    }
+
+    #[test]
+    fn inspect_rejects_trailing_bytes_after_footer_index() {
+        let mut encoded = encode_stream(&["{\"ts\":100}"], BlockOptions::default());
+        encoded.push(0xff);
+
+        let error = inspect_stream(Cursor::new(encoded)).unwrap_err();
+
+        assert!(matches!(
+            error,
+            CompactError::InvalidInput("stream has trailing bytes after footer index")
         ));
     }
 }

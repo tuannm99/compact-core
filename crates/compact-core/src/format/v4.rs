@@ -292,7 +292,11 @@ pub fn find_row_group_by_row(index: &FooterIndex, row_number: u64) -> Option<&Ro
     (row_number < row_group_end).then_some(row_group)
 }
 
-fn decode_footer_trailer(file: &[u8]) -> Result<FooterTrailer> {
+/// Decode the fixed-width trailer at EOF without parsing the footer body.
+///
+/// Validators use this to prove that row-group bytes end exactly where the
+/// footer begins, preventing unindexed gaps from being treated as valid data.
+pub fn decode_footer_trailer(file: &[u8]) -> Result<FooterTrailer> {
     if file.len() < FOOTER_TRAILER_LEN {
         return Err(CompactError::InvalidInput(
             "cmp4 footer trailer is truncated",

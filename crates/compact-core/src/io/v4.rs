@@ -10,8 +10,8 @@ use serde_json::{Map, Value};
 
 use crate::format::v3::{ColumnChunkMetadata, decode_column_metadata, encode_column_metadata};
 use crate::format::v4::{
-    ColumnIndexEntry, FooterIndex, RowGroupIndexEntry, append_footer, decode_footer, decode_header,
-    encode_empty_header,
+    ColumnIndexEntry, FooterIndex, RowGroupIndexEntry, append_footer, decode_footer,
+    decode_footer_trailer, decode_header, encode_empty_header,
 };
 use crate::io::v3::{
     DecodedColumn, decode_column, encode_column, parse_rows, validate_implemented_schema,
@@ -43,6 +43,17 @@ pub struct ScanResult {
     pub jsonl: String,
     pub row_groups_scanned: usize,
     pub row_groups_pruned: usize,
+}
+
+/// Schema-independent CMP4 prefix recovered from contiguous valid row groups.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileRecovery {
+    /// Byte offset immediately after the last valid row group.
+    pub valid_body_len: u64,
+    /// Reconstructed footer metadata for the valid prefix.
+    pub footer: FooterIndex,
+    /// Whether bytes after `valid_body_len` were not a valid current footer.
+    pub discarded_tail: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +171,213 @@ pub fn scan_jsonl(
 pub fn inspect_footer(data: &[u8]) -> Result<FooterIndex> {
     decode_header(data)?;
     decode_footer(data)
+}
+
+/// Validate the complete schema-independent CMP4 storage envelope.
+///
+/// The footer parser validates index ranges and ordering. This additional pass
+/// verifies that row groups cover the body without gaps, each row-group header
+/// agrees with the footer, and every row-group checksum is valid.
+pub fn validate_file(data: &[u8]) -> Result<FooterIndex> {
+    let header = decode_header(data)?;
+    if !header.payload.is_empty() {
+        return Err(CompactError::Unsupported("cmp4 header payload"));
+    }
+    let trailer = decode_footer_trailer(data)?;
+    let footer = decode_footer(data)?;
+    let mut expected_offset = u64::try_from(header.body_offset)
+        .map_err(|_| CompactError::InvalidInput("cmp4 header offset is too large"))?;
+
+    for row_group in &footer.row_groups {
+        if row_group.row_group_offset != expected_offset {
+            return Err(CompactError::InvalidInput(
+                "cmp4 row groups must be physically contiguous",
+            ));
+        }
+        verify_row_group(data, row_group, true)?;
+        expected_offset = expected_offset
+            .checked_add(row_group.row_group_len)
+            .ok_or(CompactError::InvalidInput("cmp4 row group range overflow"))?;
+    }
+
+    if expected_offset != trailer.footer_offset {
+        return Err(CompactError::InvalidInput(
+            "cmp4 body does not end at footer",
+        ));
+    }
+
+    Ok(footer)
+}
+
+/// Recover a contiguous CMP4 row-group prefix without requiring a schema.
+///
+/// Recovery starts after the checked file header and stops at the first
+/// malformed or checksum-invalid row group. It never searches for a later
+/// `RGB4` marker because bytes after a failed boundary are not trustworthy.
+pub fn recover_file_prefix(data: &[u8]) -> Result<FileRecovery> {
+    let header = decode_header(data)?;
+    if !header.payload.is_empty() {
+        return Err(CompactError::Unsupported("cmp4 header payload"));
+    }
+
+    let mut cursor = header.body_offset;
+    let mut row_groups = Vec::new();
+    let mut expected_first_row = 0u64;
+
+    while data
+        .get(cursor..cursor.saturating_add(ROW_GROUP_MAGIC.len()))
+        .is_some_and(|magic| magic == ROW_GROUP_MAGIC)
+    {
+        let row_group_index = u64::try_from(row_groups.len())
+            .map_err(|_| CompactError::InvalidInput("cmp4 row group count is too large"))?;
+        let Ok((row_group, next_cursor)) =
+            recover_row_group(data, cursor, row_group_index, expected_first_row)
+        else {
+            break;
+        };
+        expected_first_row = expected_first_row
+            .checked_add(row_group.row_count)
+            .ok_or(CompactError::InvalidInput("cmp4 total row count overflow"))?;
+        row_groups.push(row_group);
+        cursor = next_cursor;
+    }
+
+    let valid_body_len = u64::try_from(cursor)
+        .map_err(|_| CompactError::InvalidInput("cmp4 recovery offset is too large"))?;
+    let footer = FooterIndex {
+        total_row_count: expected_first_row,
+        row_groups,
+    };
+
+    Ok(FileRecovery {
+        valid_body_len,
+        footer,
+        discarded_tail: cursor < data.len(),
+    })
+}
+
+fn recover_row_group(
+    data: &[u8],
+    start: usize,
+    expected_index: u64,
+    expected_first_row: u64,
+) -> Result<(RowGroupIndexEntry, usize)> {
+    let mut cursor = start;
+    if read_exact(
+        data,
+        &mut cursor,
+        ROW_GROUP_MAGIC.len(),
+        "cmp4 row group magic is truncated",
+    )? != ROW_GROUP_MAGIC
+    {
+        return Err(CompactError::InvalidInput("invalid cmp4 row group magic"));
+    }
+    if read_u64(data, &mut cursor, "cmp4 row group index is truncated")? != expected_index {
+        return Err(CompactError::InvalidInput(
+            "cmp4 row group index is not sequential",
+        ));
+    }
+    if read_u64(data, &mut cursor, "cmp4 first row index is truncated")? != expected_first_row {
+        return Err(CompactError::InvalidInput(
+            "cmp4 first row index is not sequential",
+        ));
+    }
+    let row_count = read_u64(data, &mut cursor, "cmp4 row count is truncated")?;
+    if row_count == 0 {
+        return Err(CompactError::InvalidInput(
+            "cmp4 row group must contain rows",
+        ));
+    }
+    read_u64(data, &mut cursor, "cmp4 raw jsonl size is truncated")?;
+    let column_count = usize::try_from(read_u32(
+        data,
+        &mut cursor,
+        "cmp4 column count is truncated",
+    )?)
+    .map_err(|_| CompactError::InvalidInput("cmp4 column count is too large"))?;
+    let mut columns = Vec::with_capacity(column_count);
+    let mut names = HashSet::new();
+
+    for _ in 0..column_count {
+        let metadata_len = usize::try_from(read_u32(
+            data,
+            &mut cursor,
+            "cmp4 column metadata length is truncated",
+        )?)
+        .map_err(|_| CompactError::InvalidInput("cmp4 column metadata is too large"))?;
+        let metadata_offset = u64::try_from(cursor)
+            .map_err(|_| CompactError::InvalidInput("cmp4 metadata offset is too large"))?;
+        let metadata_bytes = read_exact(
+            data,
+            &mut cursor,
+            metadata_len,
+            "cmp4 column metadata is truncated",
+        )?;
+        let (metadata, consumed) = decode_column_metadata(metadata_bytes)?;
+        if consumed != metadata_bytes.len() {
+            return Err(CompactError::InvalidInput(
+                "cmp4 column metadata has trailing bytes",
+            ));
+        }
+        if metadata.value_count != row_count {
+            return Err(CompactError::InvalidInput(
+                "cmp4 column value count does not match row group",
+            ));
+        }
+        if !names.insert(metadata.name.clone()) {
+            return Err(CompactError::InvalidInput(
+                "cmp4 duplicate column in row group",
+            ));
+        }
+        crate::statistics::decode(&metadata.statistics_metadata)?;
+
+        let payload_offset = u64::try_from(cursor)
+            .map_err(|_| CompactError::InvalidInput("cmp4 payload offset is too large"))?;
+        let payload_len = usize::try_from(metadata.compressed_size)
+            .map_err(|_| CompactError::InvalidInput("cmp4 column payload is too large"))?;
+        read_exact(
+            data,
+            &mut cursor,
+            payload_len,
+            "cmp4 column payload is truncated",
+        )?;
+
+        columns.push(ColumnIndexEntry {
+            name: metadata.name,
+            metadata_offset,
+            metadata_len: u64::try_from(metadata_len)
+                .map_err(|_| CompactError::InvalidInput("cmp4 metadata length is too large"))?,
+            payload_offset,
+            payload_len: metadata.compressed_size,
+            value_count: metadata.value_count,
+            null_count: metadata.null_count,
+            statistics_metadata: metadata.statistics_metadata,
+        });
+    }
+
+    let checksum_offset = cursor;
+    let stored_checksum = read_u32(data, &mut cursor, "cmp4 row group checksum is truncated")?;
+    if !crc32::verify(&data[start..checksum_offset], stored_checksum) {
+        return Err(CompactError::InvalidInput(
+            "cmp4 row group checksum mismatch",
+        ));
+    }
+
+    let row_group_offset = u64::try_from(start)
+        .map_err(|_| CompactError::InvalidInput("cmp4 row group offset is too large"))?;
+    let row_group_len = u64::try_from(cursor - start)
+        .map_err(|_| CompactError::InvalidInput("cmp4 row group length is too large"))?;
+    Ok((
+        RowGroupIndexEntry {
+            row_group_index: expected_index,
+            first_row_index: expected_first_row,
+            row_count,
+            row_group_offset,
+            row_group_len,
+            columns,
+        },
+        cursor,
+    ))
 }
 
 fn encode_row_group(
@@ -660,7 +878,7 @@ impl DecodedSelection {
 mod tests {
     use super::{
         EncodeOptions, Predicate, U64PredicateOp, decode_jsonl, decode_jsonl_projected,
-        encode_jsonl, inspect_footer, scan_jsonl,
+        encode_jsonl, inspect_footer, recover_file_prefix, scan_jsonl, validate_file,
     };
     use crate::CompactError;
     use crate::schema::Schema;
@@ -695,6 +913,54 @@ columns:
         let decoded = decode_jsonl(&encoded, &schema()).unwrap();
 
         assert_eq!(decoded, input());
+    }
+
+    #[test]
+    fn cmp4_file_validator_checks_all_row_group_checksums() {
+        let mut encoded =
+            encode_jsonl(input(), &schema(), EncodeOptions { row_group_rows: 2 }).unwrap();
+        let footer = inspect_footer(&encoded).unwrap();
+        let payload_offset = footer.row_groups[1].columns[0].payload_offset as usize;
+
+        assert_eq!(validate_file(&encoded).unwrap().total_row_count, 4);
+
+        encoded[payload_offset] ^= 0xff;
+        let error = validate_file(&encoded).unwrap_err();
+        assert!(matches!(
+            error,
+            CompactError::InvalidInput("cmp4 row group checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn cmp4_recovery_reconstructs_footer_after_damaged_trailer() {
+        let mut encoded =
+            encode_jsonl(input(), &schema(), EncodeOptions { row_group_rows: 2 }).unwrap();
+        *encoded.last_mut().unwrap() ^= 0xff;
+
+        let recovery = recover_file_prefix(&encoded).unwrap();
+
+        assert_eq!(recovery.footer.row_groups.len(), 2);
+        assert_eq!(recovery.footer.total_row_count, 4);
+        assert!(recovery.discarded_tail);
+    }
+
+    #[test]
+    fn cmp4_recovery_stops_before_corrupt_row_group() {
+        let mut encoded =
+            encode_jsonl(input(), &schema(), EncodeOptions { row_group_rows: 2 }).unwrap();
+        let footer = inspect_footer(&encoded).unwrap();
+        let corrupt_at = footer.row_groups[1].columns[0].payload_offset as usize;
+        encoded[corrupt_at] ^= 0xff;
+
+        let recovery = recover_file_prefix(&encoded).unwrap();
+
+        assert_eq!(recovery.footer.row_groups.len(), 1);
+        assert_eq!(recovery.footer.total_row_count, 2);
+        assert_eq!(
+            recovery.valid_body_len,
+            footer.row_groups[1].row_group_offset
+        );
     }
 
     #[test]

@@ -356,6 +356,16 @@ Scale throughput across CPU cores without sacrificing ordering or safety.
 
 ## v0.9 - Production-grade Storage Format
 
+Status: Phases 1 and 2 implemented. `compact_core::storage` detects CMP1-CMP4,
+negotiates reader version ranges, and performs schema-independent validation.
+`compact validate` exposes the validator, including full CMP4 row-group checksum
+coverage. External schema revisions support checked rename, add, remove,
+nullable, default, codec, and type compatibility across CMP2-CMP4. CMP2 repair
+uses source-bound plans, valid-prefix recovery, rebuilt footers, and
+copy-on-write CLI output. CMP4 repair reconstructs footer metadata from checked
+contiguous row groups. Embedded metadata migration and compatibility benchmarks
+remain.
+
 ### Goal
 
 Harden the format for compatibility, durability, and recovery scenarios.
