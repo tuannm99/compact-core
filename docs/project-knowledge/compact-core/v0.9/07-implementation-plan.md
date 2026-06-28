@@ -33,12 +33,19 @@ Status: implemented for recoverable CMP2 and CMP4 boundaries.
 
 ## Phase 4 - Metadata Migration
 
-- Define source and destination metadata versions.
-- Add deterministic migration plans and dry-run output.
-- Verify idempotence and preserve unknown metadata when safe.
+Status: implemented for external schema metadata v1 to v2.
+
+- v1 name-based metadata migrates to explicit stable column IDs.
+- Assignments are mandatory and exact; IDs are never guessed.
+- Plans are deterministic, source-bound, and exposed through CLI dry-run.
+- Unknown YAML fields are preserved.
+- Re-running migration on v2 is a byte-identical no-op.
 
 ## Phase 5 - Release Hardening
 
-- Build a checked-in compatibility fixture matrix.
-- Add corruption simulation and repair benchmarks.
-- Publish limits, recovery guarantees, and benchmark results.
+Status: implemented with release-mode repair benchmark numbers recorded.
+
+- Checked-in text fixtures lock compatible and incompatible schema decisions.
+- Corruption tests cover all format header truncations and CMP4 recovery points.
+- `compact repair-bench` reports deterministic iteration and throughput signals.
+- Recovery guarantees, benchmark protocol, and a 100,000-row result are documented.

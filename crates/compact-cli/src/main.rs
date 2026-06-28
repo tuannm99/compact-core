@@ -76,6 +76,22 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Migrate external schema metadata to the stable-ID contract.
+    MetadataMigrate {
+        input: String,
+        #[arg(long)]
+        output: Option<String>,
+        #[arg(long = "column-id")]
+        column_ids: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Benchmark deterministic repair planning and execution.
+    RepairBench {
+        input: String,
+        #[arg(long, default_value_t = 10)]
+        iterations: usize,
+    },
     Bench {
         input: String,
         #[arg(long)]
@@ -420,6 +436,71 @@ fn main() -> Result<()> {
                 fs::write(&output, repaired)
                     .with_context(|| format!("failed to write repaired file {output}"))?;
             }
+        }
+        Commands::MetadataMigrate {
+            input,
+            output,
+            column_ids,
+            dry_run,
+        } => {
+            let source = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let assignments = parse_migration_assignments(&column_ids)?;
+            let plan = compact_core::storage::migration::plan(&source, &assignments)
+                .context("metadata is not migratable")?;
+
+            println!("source_version: {}", plan.source_version);
+            println!("target_version: {}", plan.target_version);
+            println!("action: {:?}", plan.action);
+            println!("columns: {}", plan.column_count);
+
+            if !dry_run {
+                let output =
+                    output.context("--output is required unless --dry-run is specified")?;
+                if output == input {
+                    anyhow::bail!("metadata migration output must differ from input");
+                }
+                let migrated = compact_core::storage::migration::execute(&source, &plan)
+                    .context("failed to execute metadata migration")?;
+                fs::write(&output, migrated)
+                    .with_context(|| format!("failed to write migrated metadata {output}"))?;
+            }
+        }
+        Commands::RepairBench { input, iterations } => {
+            if iterations == 0 {
+                anyhow::bail!("repair benchmark iterations must be positive");
+            }
+            let source = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
+            let plan_start = Instant::now();
+            let plan = compact_core::storage::repair::plan(&source)
+                .context("benchmark input is not repairable")?;
+            let plan_elapsed = plan_start.elapsed();
+            let execute_start = Instant::now();
+            let mut output_bytes = 0usize;
+
+            for _ in 0..iterations {
+                let repaired = compact_core::storage::repair::execute(&source, &plan)
+                    .context("repair benchmark execution failed")?;
+                output_bytes = repaired.len();
+            }
+            let execute_elapsed = execute_start.elapsed();
+            let processed_bytes = (source.len() as u64)
+                .checked_mul(iterations as u64)
+                .context("repair benchmark byte count overflow")?;
+
+            println!("mode: repair");
+            println!("format: {}", plan.format);
+            println!("action: {:?}", plan.action);
+            println!("iterations: {iterations}");
+            println!("input_bytes: {}", source.len());
+            println!("output_bytes: {output_bytes}");
+            println!("recovered_units: {}", plan.recovered_units);
+            println!("recovered_rows: {}", plan.recovered_rows);
+            println!("plan_ms: {:.3}", plan_elapsed.as_secs_f64() * 1000.0);
+            println!("execute_ms: {:.3}", execute_elapsed.as_secs_f64() * 1000.0);
+            println!(
+                "execute_mib_s: {:.3}",
+                mib_per_second(processed_bytes, execute_elapsed.as_secs_f64())
+            );
         }
         Commands::Bench {
             input,
@@ -1109,6 +1190,28 @@ fn load_schema_revision(path: &str) -> Result<compact_core::schema::evolution::S
 
     compact_core::schema::evolution::SchemaRevision::from_yaml(&data)
         .context("failed to parse schema revision")
+}
+
+fn parse_migration_assignments(
+    values: &[String],
+) -> Result<compact_core::storage::migration::MigrationAssignments> {
+    let mut stable_ids = std::collections::BTreeMap::new();
+    for value in values {
+        let (name, stable_id) = value
+            .split_once('=')
+            .context("--column-id must use name=positive_integer")?;
+        if name.is_empty() {
+            anyhow::bail!("--column-id name must not be empty");
+        }
+        let stable_id = stable_id
+            .parse::<u32>()
+            .context("--column-id must use name=positive_integer")?;
+        if stable_ids.insert(name.to_owned(), stable_id).is_some() {
+            anyhow::bail!("--column-id contains a duplicate column name");
+        }
+    }
+
+    Ok(compact_core::storage::migration::MigrationAssignments { stable_ids })
 }
 
 fn block_options(

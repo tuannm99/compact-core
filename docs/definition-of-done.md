@@ -255,6 +255,13 @@ Status: implemented. See [v0.3.md](v0.3.md) and
 
 ## v0.9 - Production-grade Storage Format
 
+Status: implemented for v0.9.0. Detection and validation cover CMP1-CMP4;
+schema evolution supports external stable-ID revisions across CMP2-CMP4;
+copy-on-write repair supports authenticated CMP2 and CMP4 prefixes; metadata
+migration upgrades external v1 schemas to stable-ID v2; compatibility,
+corruption, CLI, and repair benchmark coverage are included. See
+[v0.9.md](v0.9.md).
+
 ### Scope
 
 - Storage durability

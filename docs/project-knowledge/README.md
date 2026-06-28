@@ -30,6 +30,7 @@ How those concepts are applied in this project:
 - [v0.6 real-time streaming integration](compact-core/v0.6/README.md)
 - [v0.7 FFI and multi-language SDK](compact-core/v0.7/README.md)
 - [v0.8 parallel compression engine](compact-core/v0.8/README.md)
+- [v0.9 production storage](compact-core/v0.9/README.md)
 
 Use the concept files to learn the underlying ideas. Use the `compact-core`
 files when deciding what to build in this repository.

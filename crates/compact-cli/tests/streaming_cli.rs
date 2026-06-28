@@ -419,6 +419,104 @@ fn repair_rebuilds_damaged_cmp4_footer() {
 }
 
 #[test]
+fn metadata_migrate_plans_writes_and_is_idempotent() {
+    let dir = temp_case("metadata-migrate");
+    let source = dir.join("metadata-v1.yml");
+    let migrated = dir.join("metadata-v2.yml");
+    let second = dir.join("metadata-v2-copy.yml");
+    fs::write(
+        &source,
+        concat!(
+            "metadata_version: 1\n",
+            "revision: 1\n",
+            "owner: storage-team\n",
+            "columns:\n",
+            "  - {name: id, type: u64, codec: delta_bitpack, role: primary_key}\n",
+            "  - {name: service, type: string, codec: prefix, nullable: true}\n",
+        ),
+    )
+    .unwrap();
+
+    let dry_run = run(&[
+        "metadata-migrate",
+        source.to_str().unwrap(),
+        "--column-id",
+        "id=10",
+        "--column-id",
+        "service=20",
+        "--dry-run",
+    ]);
+    assert_success(&dry_run);
+    assert!(String::from_utf8_lossy(&dry_run.stdout).contains("action: AddStableColumnIds"));
+    assert!(!migrated.exists());
+
+    let migrate = run(&[
+        "metadata-migrate",
+        source.to_str().unwrap(),
+        "--column-id",
+        "id=10",
+        "--column-id",
+        "service=20",
+        "--output",
+        migrated.to_str().unwrap(),
+    ]);
+    assert_success(&migrate);
+    let output = fs::read_to_string(&migrated).unwrap();
+    assert!(output.contains("metadata_version: 2"));
+    assert!(output.contains("owner: storage-team"));
+    assert!(output.contains("role: primary_key"));
+
+    let idempotent = run(&[
+        "metadata-migrate",
+        migrated.to_str().unwrap(),
+        "--output",
+        second.to_str().unwrap(),
+    ]);
+    assert_success(&idempotent);
+    assert!(String::from_utf8_lossy(&idempotent.stdout).contains("action: None"));
+    assert_eq!(fs::read(migrated).unwrap(), fs::read(second).unwrap());
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn repair_bench_reports_reproducible_metrics() {
+    let dir = temp_case("repair-bench");
+    let (input, schema) = write_v4_fixture(&dir);
+    let encoded = dir.join("damaged.cmp");
+
+    assert_success(&run(&[
+        "encode",
+        input.to_str().unwrap(),
+        encoded.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--format",
+        "v4",
+        "--block-rows",
+        "2",
+    ]));
+    let mut bytes = fs::read(&encoded).unwrap();
+    *bytes.last_mut().unwrap() ^= 0xff;
+    fs::write(&encoded, bytes).unwrap();
+
+    let benchmark = run(&[
+        "repair-bench",
+        encoded.to_str().unwrap(),
+        "--iterations",
+        "3",
+    ]);
+    assert_success(&benchmark);
+    let stdout = String::from_utf8_lossy(&benchmark.stdout);
+    assert!(stdout.contains("mode: repair"));
+    assert!(stdout.contains("format: CMP4"));
+    assert!(stdout.contains("iterations: 3"));
+    assert!(stdout.contains("execute_mib_s:"));
+
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn bench_reports_streaming_metrics() {
     let dir = temp_case("bench");
     let (input, schema) = write_fixture(&dir);

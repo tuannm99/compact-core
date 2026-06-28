@@ -1,0 +1,12 @@
+metadata_version: 1
+revision: 1
+owner: compatibility-fixture
+columns:
+  - name: id
+    type: u64
+    codec: delta_varint_u64
+    role: primary_key
+  - name: service
+    type: string
+    codec: prefix
+    nullable: true

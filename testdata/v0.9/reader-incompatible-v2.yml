@@ -1,0 +1,10 @@
+revision: 2
+columns:
+  - stable_id: 1
+    name: id
+    type: string
+    codec: prefix
+  - stable_id: 2
+    name: service
+    type: string
+    codec: prefix

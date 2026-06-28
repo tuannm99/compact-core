@@ -8,9 +8,11 @@ validator can prove which bytes are trustworthy.
 2. [Compatibility and validation](02-compatibility-and-validation.md)
 3. [Schema evolution](03-schema-evolution.md)
 4. [Recovery and repair](04-recovery-and-repair.md)
-5. [Implementation plan](05-implementation-plan.md)
+5. [Metadata migration](05-metadata-migration.md)
+6. [Release hardening](06-release-hardening.md)
+7. [Implementation plan](07-implementation-plan.md)
 
-Phases 1 through 3 are implemented. Copy-on-write repair supports recoverable
-CMP2 block prefixes and CMP4 row-group prefixes. The delivered APIs cover format
-detection, validation, checked schema evolution, recovery planning, and related
-CLI tools.
+Phases 1 through 5 are implemented. The delivered APIs cover format detection,
+validation, checked schema evolution, copy-on-write recovery, deterministic
+external metadata migration, compatibility/corruption matrices, and related CLI
+tools.

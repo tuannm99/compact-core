@@ -13,6 +13,7 @@ use crate::{
     VERSION_V3, VERSION_V4, framing,
 };
 
+pub mod migration;
 pub mod repair;
 
 /// A storage format understood by this release.
@@ -311,5 +312,58 @@ mod tests {
             error,
             CompactError::InvalidInput("cmp4 row group checksum mismatch")
         ));
+    }
+
+    #[test]
+    fn corruption_matrix_rejects_every_supported_header_truncation() {
+        let files = [
+            framing::encode_v1(Codec::Rle, &[]),
+            crate::streaming::encode_jsonl_stream(
+                Cursor::new(jsonl()),
+                Vec::new(),
+                schema(),
+                BlockOptions::default(),
+            )
+            .unwrap(),
+            crate::io::v3::encode_jsonl(jsonl(), &schema()).unwrap(),
+            crate::io::v4::encode_jsonl(
+                jsonl(),
+                &schema(),
+                crate::io::v4::EncodeOptions::default(),
+            )
+            .unwrap(),
+        ];
+
+        for file in files {
+            for truncated_len in 0..5 {
+                assert!(
+                    validate(&file[..truncated_len]).is_err(),
+                    "format header truncation at {truncated_len} bytes must fail"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cmp4_corruption_matrix_recovers_only_groups_before_damage() {
+        let file = crate::io::v4::encode_jsonl(
+            jsonl(),
+            &schema(),
+            crate::io::v4::EncodeOptions { row_group_rows: 1 },
+        )
+        .unwrap();
+        let footer = crate::io::v4::inspect_footer(&file).unwrap();
+
+        for (position, row_group) in footer.row_groups.iter().enumerate() {
+            let mut corrupted = file.clone();
+            let offset = row_group.columns[0].payload_offset as usize;
+            corrupted[offset] ^= 0xff;
+
+            assert!(validate(&corrupted).is_err());
+            let plan = crate::storage::repair::plan(&corrupted).unwrap();
+            assert_eq!(plan.recovered_units, position as u64);
+            let repaired = crate::storage::repair::execute(&corrupted, &plan).unwrap();
+            assert!(validate(&repaired).is_ok());
+        }
     }
 }

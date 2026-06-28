@@ -1,0 +1,11 @@
+revision: 1
+columns:
+  - stable_id: 1
+    name: id
+    type: u64
+    codec: delta_varint_u64
+  - stable_id: 2
+    name: service
+    type: string
+    codec: prefix
+    nullable: true

@@ -603,4 +603,24 @@ columns:
             );
         }
     }
+
+    #[test]
+    fn checked_in_compatibility_fixture_matrix_has_stable_decisions() {
+        let writer =
+            SchemaRevision::from_yaml(include_str!("../../../../testdata/v0.9/writer-v1.yml"))
+                .unwrap();
+        let compatible = SchemaRevision::from_yaml(include_str!(
+            "../../../../testdata/v0.9/reader-compatible-v2.yml"
+        ))
+        .unwrap();
+        let incompatible = SchemaRevision::from_yaml(include_str!(
+            "../../../../testdata/v0.9/reader-incompatible-v2.yml"
+        ))
+        .unwrap();
+
+        assert!(assess(&writer, &compatible).unwrap().is_compatible());
+        let rejected = assess(&writer, &incompatible).unwrap();
+        assert!(!rejected.is_compatible());
+        assert_eq!(rejected.issues.len(), 2);
+    }
 }
