@@ -8,6 +8,7 @@
 use serde_json::{Map, Value};
 
 use crate::format::v3::ColumnChunkMetadata;
+use crate::limits::MAX_DECODED_VALUES;
 use crate::primitives::bitmap;
 use crate::schema::{ColumnSchema, SchemaCodec, SchemaValueType};
 use crate::{CompactError, Result};
@@ -107,6 +108,11 @@ pub fn decode_boolean_column(
 
     let value_count = usize::try_from(metadata.value_count)
         .map_err(|_| CompactError::InvalidInput("cmp3 boolean value count is too large"))?;
+    if value_count > MAX_DECODED_VALUES {
+        return Err(CompactError::InvalidInput(
+            "cmp3 boolean value count exceeds configured limit",
+        ));
+    }
     let null_count = usize::try_from(metadata.null_count)
         .map_err(|_| CompactError::InvalidInput("cmp3 boolean null count is too large"))?;
     let non_null_count = value_count

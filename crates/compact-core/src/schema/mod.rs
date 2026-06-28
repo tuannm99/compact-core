@@ -11,11 +11,13 @@ pub mod evolution;
 /// version-specific validation explicit prevents older encoders from silently
 /// accepting nullable values or codecs they cannot serialize.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Schema {
     pub columns: Vec<ColumnSchema>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ColumnSchema {
     pub name: String,
     #[serde(rename = "type")]
@@ -64,6 +66,7 @@ impl Schema {
             ));
         }
 
+        validate_column_names(&self.columns)?;
         for column in &self.columns {
             match (column.value_type, column.codec, column.nullable) {
                 (SchemaValueType::U64, SchemaCodec::DeltaVarintU64, false) => {}
@@ -89,22 +92,8 @@ impl Schema {
             ));
         }
 
-        for (index, column) in self.columns.iter().enumerate() {
-            if column.name.is_empty() {
-                return Err(CompactError::InvalidInput(
-                    "schema column name must not be empty",
-                ));
-            }
-
-            if self.columns[..index]
-                .iter()
-                .any(|previous| previous.name == column.name)
-            {
-                return Err(CompactError::InvalidInput(
-                    "schema column names must be unique",
-                ));
-            }
-
+        validate_column_names(&self.columns)?;
+        for column in &self.columns {
             let supported = match column.value_type {
                 SchemaValueType::U64 => matches!(
                     column.codec,
@@ -135,6 +124,25 @@ impl Schema {
 
         Ok(&self.columns)
     }
+}
+
+fn validate_column_names(columns: &[ColumnSchema]) -> Result<()> {
+    for (index, column) in columns.iter().enumerate() {
+        if column.name.is_empty() {
+            return Err(CompactError::InvalidInput(
+                "schema column name must not be empty",
+            ));
+        }
+        if columns[..index]
+            .iter()
+            .any(|previous| previous.name == column.name)
+        {
+            return Err(CompactError::InvalidInput(
+                "schema column names must be unique",
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl ColumnSchema {
@@ -203,6 +211,16 @@ columns:
     #[test]
     fn schema_rejects_invalid_yaml() {
         let err = Schema::from_yaml("columns: [").unwrap_err();
+
+        assert!(matches!(err, CompactError::InvalidInput("invalid schema")));
+    }
+
+    #[test]
+    fn schema_rejects_unknown_fields() {
+        let err = Schema::from_yaml(
+            "columns:\n  - name: ts\n    type: u64\n    codec: delta_varint_u64\n    nullabe: true\n",
+        )
+        .unwrap_err();
 
         assert!(matches!(err, CompactError::InvalidInput("invalid schema")));
     }
@@ -309,5 +327,19 @@ columns:
             err,
             CompactError::InvalidInput("schema column names must be unique")
         ));
+    }
+
+    #[test]
+    fn v2_schema_rejects_empty_and_duplicate_column_names() {
+        for yaml in [
+            "columns:\n  - name: ''\n    type: u64\n    codec: delta_varint_u64\n",
+            "columns:\n  - name: ts\n    type: u64\n    codec: delta_varint_u64\n  - name: ts\n    type: string\n    codec: rle\n",
+        ] {
+            let error = Schema::from_yaml(yaml)
+                .unwrap()
+                .supported_columns()
+                .unwrap_err();
+            assert!(matches!(error, CompactError::InvalidInput(_)));
+        }
     }
 }

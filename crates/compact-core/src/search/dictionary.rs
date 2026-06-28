@@ -4,6 +4,7 @@
 //! independently checked posting-list payload. Readers can binary-search term
 //! metadata, then decode or seek inside only that term's posting list.
 
+use crate::limits::MAX_COLLECTION_ENTRIES;
 use crate::{
     CompactError, Result, checksum32,
     primitives::varint,
@@ -227,6 +228,12 @@ fn validate_terms(entries: &[TermPostingList]) -> Result<()> {
 fn decode_entries(data: &[u8], term_count: u64, postings_len: u64) -> Result<Vec<TermIndexEntry>> {
     let capacity = usize::try_from(term_count)
         .map_err(|_| CompactError::InvalidInput("term dictionary count is too large"))?;
+    const MIN_TERM_ENTRY_LEN: usize = 5;
+    if capacity > MAX_COLLECTION_ENTRIES || capacity > data.len() / MIN_TERM_ENTRY_LEN {
+        return Err(CompactError::InvalidInput(
+            "term dictionary count exceeds section bounds",
+        ));
+    }
     let mut entries = Vec::with_capacity(capacity);
     let mut cursor = 0usize;
     let mut previous = None;
@@ -332,8 +339,8 @@ fn take_section<'a>(
 #[cfg(test)]
 mod tests {
     use super::{
-        TermPostingList, encode_dictionary, inspect_dictionary, inspect_term_postings, lookup_term,
-        seek_term_doc,
+        TermPostingList, decode_entries, encode_dictionary, inspect_dictionary,
+        inspect_term_postings, lookup_term, seek_term_doc,
     };
     use crate::{CompactError, search::postings::Posting};
 
@@ -484,6 +491,14 @@ mod tests {
         assert!(matches!(
             err,
             CompactError::InvalidInput("term dictionary checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn entry_decoder_rejects_count_beyond_dictionary_bytes() {
+        assert!(matches!(
+            decode_entries(&[], 1, 0).unwrap_err(),
+            CompactError::InvalidInput(_)
         ));
     }
 }

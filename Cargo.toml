@@ -14,6 +14,7 @@ authors = ["tuannm99"]
 
 [workspace.dependencies]
 anyhow = "1.0"
+blake3 = "1.8"
 clap = { version = "4.5", features = ["derive"] }
 crc32fast = "1.4"
 serde = { version = "1.0", features = ["derive"] }

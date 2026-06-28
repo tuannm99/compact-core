@@ -377,6 +377,47 @@ fn repair_dry_run_and_copy_on_write_recover_cmp2_prefix() {
     fs::remove_dir_all(dir).ok();
 }
 
+#[cfg(unix)]
+#[test]
+fn repair_rejects_hard_link_and_symlink_outputs_to_source() {
+    use std::os::unix::fs::symlink;
+
+    let dir = temp_case("repair-alias");
+    let (input, schema) = write_fixture(&dir);
+    let source = dir.join("append.cmp");
+    assert_success(&run(&[
+        "stream-append",
+        input.to_str().unwrap(),
+        source.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+    ]));
+    let original = fs::read(&source).unwrap();
+
+    let hard_link = dir.join("hard-link.cmp");
+    fs::hard_link(&source, &hard_link).unwrap();
+    assert_failure(&run(&[
+        "repair",
+        source.to_str().unwrap(),
+        "--output",
+        hard_link.to_str().unwrap(),
+    ]));
+    assert_eq!(fs::read(&source).unwrap(), original);
+    fs::remove_file(&hard_link).unwrap();
+
+    let symlink_path = dir.join("symlink.cmp");
+    symlink(&source, &symlink_path).unwrap();
+    assert_failure(&run(&[
+        "repair",
+        source.to_str().unwrap(),
+        "--output",
+        symlink_path.to_str().unwrap(),
+    ]));
+    assert_eq!(fs::read(&source).unwrap(), original);
+
+    fs::remove_dir_all(dir).ok();
+}
+
 #[test]
 fn repair_rebuilds_damaged_cmp4_footer() {
     let dir = temp_case("repair-cmp4");
@@ -963,5 +1004,54 @@ fn append_stream_cli_recovers_replays_rolls_benchmarks_and_snapshots() {
     assert_eq!(fs::read(&restored).unwrap(), fs::read(&state).unwrap());
     assert!(String::from_utf8_lossy(&decode.stdout).contains("checkpoint_id: 42"));
 
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn failed_streaming_encode_preserves_existing_destination() {
+    let dir = temp_case("atomic-encode");
+    let input = dir.join("invalid.jsonl");
+    let schema = dir.join("schema.yml");
+    let output = dir.join("output.cmp");
+    fs::write(&input, "{\"missing\":1}\n").unwrap();
+    fs::write(
+        &schema,
+        "columns:\n  - name: ts\n    type: u64\n    codec: delta_varint_u64\n",
+    )
+    .unwrap();
+    fs::write(&output, b"existing-output").unwrap();
+
+    let result = run(&[
+        "encode",
+        input.to_str().unwrap(),
+        output.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+    ]);
+
+    assert_failure(&result);
+    assert_eq!(fs::read(&output).unwrap(), b"existing-output");
+    fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn failed_streaming_decode_preserves_existing_destination() {
+    let dir = temp_case("atomic-decode");
+    let (_input, schema) = write_fixture(&dir);
+    let encoded = dir.join("invalid.cmp");
+    let output = dir.join("output.jsonl");
+    fs::write(&encoded, b"CMP2").unwrap();
+    fs::write(&output, b"existing-output").unwrap();
+
+    let result = run(&[
+        "decode",
+        encoded.to_str().unwrap(),
+        output.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+    ]);
+
+    assert_failure(&result);
+    assert_eq!(fs::read(&output).unwrap(), b"existing-output");
     fs::remove_dir_all(dir).ok();
 }

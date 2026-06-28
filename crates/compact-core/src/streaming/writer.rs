@@ -7,6 +7,7 @@
 use std::io::Write;
 
 use crate::io::encode_jsonl_row_group;
+use crate::limits::MAX_STREAM_BLOCKS;
 use crate::primitives::crc32;
 use crate::schema::Schema;
 use crate::streaming::{BLOCK_MAGIC_V1, BlockMetadata, BlockOptions, INDEX_MAGIC_V1};
@@ -126,6 +127,11 @@ impl<W: Write> JsonlBlockWriter<W> {
         if self.current.is_empty() {
             return Ok(());
         }
+        if self.blocks_written >= MAX_STREAM_BLOCKS as u64 {
+            return Err(CompactError::InvalidInput(
+                "stream block count exceeds configured limit",
+            ));
+        }
 
         let row_group = encode_jsonl_row_group(self.current.as_str(), &self.schema)?;
         let block_payload = encode_block_payload(
@@ -148,9 +154,18 @@ impl<W: Write> JsonlBlockWriter<W> {
         };
 
         self.writer.write_all(&encoded_frame)?;
-        self.blocks_written += 1;
-        self.rows_written += metadata.row_count;
-        self.bytes_written += compressed_size;
+        self.blocks_written = self
+            .blocks_written
+            .checked_add(1)
+            .ok_or(CompactError::InvalidInput("stream block count overflow"))?;
+        self.rows_written = self
+            .rows_written
+            .checked_add(metadata.row_count)
+            .ok_or(CompactError::InvalidInput("stream row count overflow"))?;
+        self.bytes_written = self
+            .bytes_written
+            .checked_add(compressed_size)
+            .ok_or(CompactError::InvalidInput("stream byte count overflow"))?;
         self.metadata.push(metadata);
         self.current.clear();
 
@@ -186,6 +201,10 @@ impl<W: Write> JsonlBlockWriter<W> {
     /// callers that want progress information while writing.
     pub fn metadata(&self) -> &[BlockMetadata] {
         &self.metadata
+    }
+
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.bytes_written
     }
 }
 

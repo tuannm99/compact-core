@@ -7,6 +7,7 @@
 use std::io::{ErrorKind, Read};
 
 use crate::io::decode_jsonl;
+use crate::limits::{MAX_ENCODED_BLOCK_BYTES, MAX_STREAM_BLOCKS};
 use crate::primitives::crc32;
 use crate::schema::Schema;
 use crate::streaming::{BLOCK_MAGIC_V1, BlockMetadata, INDEX_MAGIC_V1};
@@ -49,11 +50,22 @@ pub struct JsonlBlockReader<R: Read> {
     next_block_index: u64,
     next_row_index: u64,
     next_offset: u64,
+    metadata: Vec<BlockMetadata>,
+    require_footer: bool,
+    finished: bool,
 }
 
 impl<R: Read> JsonlBlockReader<R> {
     /// Create a reader and validate the v0.2 stream header.
-    pub fn new(mut reader: R, schema: Schema) -> Result<Self> {
+    pub fn new(reader: R, schema: Schema) -> Result<Self> {
+        Self::new_with_mode(reader, schema, true)
+    }
+
+    pub(crate) fn new_unsealed(reader: R, schema: Schema) -> Result<Self> {
+        Self::new_with_mode(reader, schema, false)
+    }
+
+    fn new_with_mode(mut reader: R, schema: Schema, require_footer: bool) -> Result<Self> {
         validate_stream_header(&mut reader)?;
 
         Ok(Self {
@@ -62,6 +74,9 @@ impl<R: Read> JsonlBlockReader<R> {
             next_block_index: 0,
             next_row_index: 0,
             next_offset: STREAM_HEADER_LEN as u64,
+            metadata: Vec::new(),
+            require_footer,
+            finished: false,
         })
     }
 
@@ -115,9 +130,19 @@ impl<R: Read> JsonlBlockReader<R> {
             compressed_size: usize_to_u64(frame_len, "block frame is too large")?,
             checksum: crc32::checksum(&decoded.payload),
         };
-        self.next_block_index += 1;
-        self.next_row_index += metadata.row_count;
-        self.next_offset += metadata.compressed_size;
+        self.next_block_index = self
+            .next_block_index
+            .checked_add(1)
+            .ok_or(CompactError::InvalidInput("stream block index overflow"))?;
+        self.next_row_index = self
+            .next_row_index
+            .checked_add(metadata.row_count)
+            .ok_or(CompactError::InvalidInput("stream row count overflow"))?;
+        self.next_offset = self
+            .next_offset
+            .checked_add(metadata.compressed_size)
+            .ok_or(CompactError::InvalidInput("stream offset overflow"))?;
+        self.metadata.push(metadata);
 
         Ok(Some(DecodedBlock {
             metadata,
@@ -127,9 +152,29 @@ impl<R: Read> JsonlBlockReader<R> {
     }
 
     fn read_next_frame(&mut self) -> Result<Option<Vec<u8>>> {
+        if self.finished {
+            return Ok(None);
+        }
+
         match read_next_record_from(&mut self.reader)? {
             StreamRecord::Frame(frame) => Ok(Some(frame)),
-            StreamRecord::Index(_) | StreamRecord::Eof => Ok(None),
+            StreamRecord::Index(index) => {
+                if index != self.metadata {
+                    return Err(CompactError::InvalidInput(
+                        "footer index does not match scanned blocks",
+                    ));
+                }
+                ensure_reader_eof(&mut self.reader)?;
+                self.finished = true;
+                Ok(None)
+            }
+            StreamRecord::Eof if self.require_footer => Err(CompactError::InvalidInput(
+                "sealed stream footer is missing",
+            )),
+            StreamRecord::Eof => {
+                self.finished = true;
+                Ok(None)
+            }
         }
     }
 }
@@ -193,15 +238,33 @@ pub fn inspect_jsonl_stream<R: Read>(mut reader: R) -> Result<StreamInspect> {
             checksum: crc32::checksum(&decoded.payload),
         };
 
-        expected_block_index += 1;
-        expected_first_row_index += metadata.row_count;
-        next_offset += metadata.compressed_size;
+        expected_block_index = expected_block_index
+            .checked_add(1)
+            .ok_or(CompactError::InvalidInput("stream block index overflow"))?;
+        expected_first_row_index = expected_first_row_index
+            .checked_add(metadata.row_count)
+            .ok_or(CompactError::InvalidInput("stream row count overflow"))?;
+        next_offset = next_offset
+            .checked_add(metadata.compressed_size)
+            .ok_or(CompactError::InvalidInput("stream offset overflow"))?;
         blocks.push(metadata);
     }
 
-    let total_rows = blocks.iter().map(|block| block.row_count).sum();
-    let total_uncompressed_size = blocks.iter().map(|block| block.uncompressed_size).sum();
-    let total_compressed_size = blocks.iter().map(|block| block.compressed_size).sum();
+    let total_rows = checked_block_total(
+        &blocks,
+        |block| block.row_count,
+        "stream row count overflow",
+    )?;
+    let total_uncompressed_size = checked_block_total(
+        &blocks,
+        |block| block.uncompressed_size,
+        "stream uncompressed size overflow",
+    )?;
+    let total_compressed_size = checked_block_total(
+        &blocks,
+        |block| block.compressed_size,
+        "stream compressed size overflow",
+    )?;
 
     if footer_index.as_ref().is_some_and(|index| index != &blocks) {
         return Err(CompactError::InvalidInput(
@@ -216,6 +279,29 @@ pub fn inspect_jsonl_stream<R: Read>(mut reader: R) -> Result<StreamInspect> {
         total_uncompressed_size,
         total_compressed_size,
     })
+}
+
+fn checked_block_total(
+    blocks: &[BlockMetadata],
+    value: impl Fn(&BlockMetadata) -> u64,
+    error: &'static str,
+) -> Result<u64> {
+    blocks.iter().try_fold(0u64, |total, block| {
+        total
+            .checked_add(value(block))
+            .ok_or(CompactError::InvalidInput(error))
+    })
+}
+
+pub(crate) fn ensure_reader_eof<R: Read>(reader: &mut R) -> Result<()> {
+    let mut trailing = [0u8; 1];
+    match reader.read(&mut trailing) {
+        Ok(0) => Ok(()),
+        Ok(_) => Err(CompactError::InvalidInput(
+            "stream has trailing bytes after footer index",
+        )),
+        Err(error) => Err(CompactError::Io(error)),
+    }
 }
 
 pub(crate) fn validate_stream_header<R: Read>(reader: &mut R) -> Result<()> {
@@ -278,10 +364,18 @@ pub(crate) fn read_next_record_from<R: Read>(reader: &mut R) -> Result<StreamRec
     );
     let payload_len = usize::try_from(payload_len)
         .map_err(|_| CompactError::InvalidInput("frame payload length is too large"))?;
-    let mut frame = Vec::with_capacity(FRAME_HEADER_LEN + payload_len);
+    if payload_len > MAX_ENCODED_BLOCK_BYTES {
+        return Err(CompactError::InvalidInput(
+            "frame payload length exceeds configured limit",
+        ));
+    }
+    let frame_len = FRAME_HEADER_LEN
+        .checked_add(payload_len)
+        .ok_or(CompactError::InvalidInput("frame length overflow"))?;
+    let mut frame = Vec::with_capacity(frame_len);
 
     frame.extend_from_slice(&header);
-    frame.resize(FRAME_HEADER_LEN + payload_len, 0);
+    frame.resize(frame_len, 0);
     read_exact_invalid(
         reader,
         &mut frame[FRAME_HEADER_LEN..],
@@ -316,7 +410,12 @@ fn read_index_footer_after_magic<R: Read>(reader: &mut R) -> Result<Vec<BlockMet
         u64::from_le_bytes(count_bytes),
         "index block count is too large",
     )?;
-    let mut blocks = Vec::with_capacity(block_count);
+    if block_count > MAX_STREAM_BLOCKS {
+        return Err(CompactError::InvalidInput(
+            "index block count exceeds configured limit",
+        ));
+    }
+    let mut blocks = Vec::new();
 
     for expected_index in 0..block_count {
         let mut entry = [0u8; INDEX_ENTRY_LEN];
@@ -469,9 +568,10 @@ pub(crate) fn usize_to_u64(value: usize, err: &'static str) -> Result<u64> {
 mod tests {
     use std::io::Cursor;
 
-    use super::JsonlBlockReader;
+    use super::{FRAME_HEADER_LEN, FRAME_PAYLOAD_LEN_OFFSET, JsonlBlockReader, STREAM_HEADER_LEN};
+    use crate::limits::{MAX_ENCODED_BLOCK_BYTES, MAX_STREAM_BLOCKS};
     use crate::streaming::{BlockOptions, JsonlBlockWriter, inspect_stream};
-    use crate::{CompactError, MAGIC_V2, VERSION_V2};
+    use crate::{CompactError, MAGIC_V2, VERSION_V2, streaming::INDEX_MAGIC_V1};
 
     fn schema() -> crate::schema::Schema {
         crate::schema::Schema::from_yaml(
@@ -596,6 +696,45 @@ columns:
         assert!(matches!(
             err,
             CompactError::InvalidInput("frame payload is truncated")
+        ));
+    }
+
+    #[test]
+    fn reader_rejects_oversized_frame_before_allocating_payload() {
+        let mut data = encode_stream(&["{\"ts\":100}"], BlockOptions::default());
+        data.truncate(STREAM_HEADER_LEN + FRAME_HEADER_LEN);
+        data[STREAM_HEADER_LEN + FRAME_PAYLOAD_LEN_OFFSET
+            ..STREAM_HEADER_LEN + FRAME_PAYLOAD_LEN_OFFSET + 8]
+            .copy_from_slice(&((MAX_ENCODED_BLOCK_BYTES as u64) + 1).to_le_bytes());
+
+        let mut reader = JsonlBlockReader::new(Cursor::new(data), schema()).unwrap();
+        let error = reader.next_block().unwrap_err();
+
+        assert!(matches!(error, CompactError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn reader_rejects_excessive_footer_count_before_reading_entries() {
+        let mut data = encode_stream(&[], BlockOptions::default());
+        data.truncate(STREAM_HEADER_LEN + INDEX_MAGIC_V1.len());
+        data.extend_from_slice(&((MAX_STREAM_BLOCKS as u64) + 1).to_le_bytes());
+
+        let mut reader = JsonlBlockReader::new(Cursor::new(data), schema()).unwrap();
+        let error = reader.next_block().unwrap_err();
+
+        assert!(matches!(error, CompactError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn reader_rejects_trailing_bytes_after_footer() {
+        let mut data = encode_stream(&["{\"ts\":100}"], BlockOptions::default());
+        data.push(0xff);
+        let mut reader = JsonlBlockReader::new(Cursor::new(data), schema()).unwrap();
+
+        assert!(reader.next_block().unwrap().is_some());
+        assert!(matches!(
+            reader.next_block().unwrap_err(),
+            CompactError::InvalidInput("stream has trailing bytes after footer index")
         ));
     }
 

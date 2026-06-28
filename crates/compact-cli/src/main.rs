@@ -1,5 +1,7 @@
-use std::fs;
-use std::io::{BufReader, Cursor};
+use std::fs::{self, OpenOptions};
+use std::io::{BufReader, Cursor, ErrorKind, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -239,15 +241,16 @@ fn main() -> Result<()> {
                             .context("invalid streaming block options")?;
                         let input_file = fs::File::open(&input)
                             .with_context(|| format!("failed to open {input}"))?;
-                        let output_file = fs::File::create(&output)
-                            .with_context(|| format!("failed to create {output}"))?;
-                        compact_core::streaming::encode_jsonl_stream(
-                            BufReader::new(input_file),
-                            output_file,
-                            schema,
-                            options,
-                        )
-                        .context("failed to stream encode JSONL input")?;
+                        atomic_write_with(&output, |output_file| {
+                            compact_core::streaming::encode_jsonl_stream(
+                                BufReader::new(input_file),
+                                output_file,
+                                schema,
+                                options,
+                            )
+                            .context("failed to stream encode JSONL input")?;
+                            Ok(())
+                        })?;
                     }
                     CliFormat::V3 => {
                         let input_text = fs::read_to_string(&input)
@@ -304,14 +307,15 @@ fn main() -> Result<()> {
                     CliFormat::V2 => {
                         let input_file = fs::File::open(&input)
                             .with_context(|| format!("failed to open {input}"))?;
-                        let output_file = fs::File::create(&output)
-                            .with_context(|| format!("failed to create {output}"))?;
-                        compact_core::streaming::decode_jsonl_stream(
-                            input_file,
-                            output_file,
-                            schema,
-                        )
-                        .context("failed to stream decode JSONL input")?;
+                        atomic_write_with(&output, |output_file| {
+                            compact_core::streaming::decode_jsonl_stream(
+                                input_file,
+                                output_file,
+                                schema,
+                            )
+                            .context("failed to stream decode JSONL input")?;
+                            Ok(())
+                        })?;
                     }
                     CliFormat::V3 => {
                         let encoded =
@@ -428,13 +432,10 @@ fn main() -> Result<()> {
             if !dry_run {
                 let output =
                     output.context("--output is required unless --dry-run is specified")?;
-                if output == input {
-                    anyhow::bail!("repair output must differ from input");
-                }
                 let repaired = compact_core::storage::repair::execute(&source, &plan)
                     .context("failed to execute repair plan")?;
-                fs::write(&output, repaired)
-                    .with_context(|| format!("failed to write repaired file {output}"))?;
+                write_new_file(&output, &repaired)
+                    .with_context(|| format!("failed to create repaired file {output}"))?;
             }
         }
         Commands::MetadataMigrate {
@@ -456,13 +457,10 @@ fn main() -> Result<()> {
             if !dry_run {
                 let output =
                     output.context("--output is required unless --dry-run is specified")?;
-                if output == input {
-                    anyhow::bail!("metadata migration output must differ from input");
-                }
                 let migrated = compact_core::storage::migration::execute(&source, &plan)
                     .context("failed to execute metadata migration")?;
-                fs::write(&output, migrated)
-                    .with_context(|| format!("failed to write migrated metadata {output}"))?;
+                write_new_file(&output, &migrated)
+                    .with_context(|| format!("failed to create migrated metadata {output}"))?;
             }
         }
         Commands::RepairBench { input, iterations } => {
@@ -858,7 +856,15 @@ fn main() -> Result<()> {
             let schema = load_schema(&schema)?;
             let options = block_options(block_rows, block_bytes)
                 .context("invalid append stream block options")?;
-            let existing = fs::read(&output).unwrap_or_default();
+            let existing = match fs::read(&output) {
+                Ok(existing) => existing,
+                Err(error) if error.kind() == ErrorKind::NotFound => Vec::new(),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("failed to read existing append stream {output}")
+                    });
+                }
+            };
             let input_file =
                 fs::File::open(&input).with_context(|| format!("failed to open {input}"))?;
             let encoded = compact_core::streaming::append_jsonl_stream(
@@ -868,7 +874,7 @@ fn main() -> Result<()> {
                 options,
             )
             .context("failed to append JSONL stream")?;
-            fs::write(&output, encoded).with_context(|| format!("failed to write {output}"))?;
+            atomic_write_bytes(&output, &encoded)?;
         }
         Commands::StreamRecover { input } => {
             let data = fs::read(&input).with_context(|| format!("failed to read {input}"))?;
@@ -1005,6 +1011,91 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_write_bytes(output: impl AsRef<Path>, bytes: &[u8]) -> Result<()> {
+    atomic_write_with(output, |file| {
+        file.write_all(bytes)?;
+        Ok(())
+    })
+}
+
+fn atomic_write_with(
+    output: impl AsRef<Path>,
+    operation: impl FnOnce(&mut fs::File) -> Result<()>,
+) -> Result<()> {
+    let output = output.as_ref();
+    let (temporary_path, mut temporary) = create_temporary_sibling(output)?;
+    let result = operation(&mut temporary)
+        .and_then(|()| {
+            temporary
+                .flush()
+                .context("failed to flush temporary output")
+        })
+        .and_then(|()| {
+            temporary
+                .sync_all()
+                .context("failed to sync temporary output")
+        });
+    drop(temporary);
+
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary_path, output) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error).with_context(|| format!("failed to replace {}", output.display()));
+    }
+    Ok(())
+}
+
+fn create_temporary_sibling(output: &Path) -> Result<(PathBuf, fs::File)> {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let name = output
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("compact-output");
+
+    for _ in 0..32 {
+        let id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), id));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to create {}", path.display()));
+            }
+        }
+    }
+
+    anyhow::bail!("failed to allocate a unique temporary output path")
+}
+
+fn write_new_file(output: impl AsRef<Path>, bytes: &[u8]) -> Result<()> {
+    let output = output.as_ref();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)
+        .with_context(|| {
+            format!(
+                "output already exists or cannot be created: {}",
+                output.display()
+            )
+        })?;
+    if let Err(error) = file
+        .write_all(bytes)
+        .and_then(|()| file.flush())
+        .and_then(|()| file.sync_all())
+    {
+        drop(file);
+        let _ = fs::remove_file(output);
+        return Err(error).with_context(|| format!("failed to write {}", output.display()));
+    }
     Ok(())
 }
 

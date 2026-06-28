@@ -1,8 +1,8 @@
 //! Copy-on-write repair planning for recoverable storage files.
 //!
-//! A plan is bound to the source length and checksum. Execution rejects a plan
-//! if the caller supplies different bytes, preventing a stale plan from
-//! truncating a file that changed between inspection and repair.
+//! A plan is bound to the source length and a BLAKE3 digest. Execution rejects
+//! different bytes, preventing a stale plan from truncating a file that changed
+//! between inspection and repair. CRC32 remains public only as a diagnostic.
 
 use std::io::Cursor;
 
@@ -27,7 +27,9 @@ pub struct RepairPlan {
     pub format: StorageFormat,
     pub action: RepairAction,
     pub source_len: u64,
+    /// Diagnostic checksum for logs; plan execution uses the private BLAKE3 digest.
     pub source_checksum: u32,
+    source_digest: [u8; 32],
     pub recoverable_len: u64,
     pub discarded_bytes: u64,
     pub recovered_units: u64,
@@ -43,10 +45,11 @@ pub fn plan(data: &[u8]) -> Result<RepairPlan> {
     let source_len = u64::try_from(data.len())
         .map_err(|_| CompactError::InvalidInput("repair source is too large"))?;
     let source_checksum = checksum32(data);
+    let source_digest = *blake3::hash(data).as_bytes();
 
     match format {
-        StorageFormat::V2 => plan_cmp2(data, source_len, source_checksum),
-        StorageFormat::V4 => plan_cmp4(data, source_len, source_checksum),
+        StorageFormat::V2 => plan_cmp2(data, source_len, source_checksum, source_digest),
+        StorageFormat::V4 => plan_cmp4(data, source_len, source_checksum, source_digest),
         StorageFormat::V1 | StorageFormat::V3 => Err(CompactError::Unsupported(
             "repair supports cmp2 and cmp4 files",
         )),
@@ -61,7 +64,7 @@ pub fn plan(data: &[u8]) -> Result<RepairPlan> {
 pub fn execute(data: &[u8], plan: &RepairPlan) -> Result<Vec<u8>> {
     let source_len = u64::try_from(data.len())
         .map_err(|_| CompactError::InvalidInput("repair source is too large"))?;
-    if source_len != plan.source_len || checksum32(data) != plan.source_checksum {
+    if source_len != plan.source_len || blake3::hash(data).as_bytes() != &plan.source_digest {
         return Err(CompactError::InvalidInput(
             "repair source does not match plan",
         ));
@@ -125,7 +128,12 @@ pub fn execute(data: &[u8], plan: &RepairPlan) -> Result<Vec<u8>> {
     }
 }
 
-fn plan_cmp2(data: &[u8], source_len: u64, source_checksum: u32) -> Result<RepairPlan> {
+fn plan_cmp2(
+    data: &[u8],
+    source_len: u64,
+    source_checksum: u32,
+    source_digest: [u8; 32],
+) -> Result<RepairPlan> {
     if let Ok(inspect) = crate::streaming::inspect_stream(Cursor::new(data))
         && inspect.footer_index.is_some()
     {
@@ -133,6 +141,7 @@ fn plan_cmp2(data: &[u8], source_len: u64, source_checksum: u32) -> Result<Repai
             StorageFormat::V2,
             source_len,
             source_checksum,
+            source_digest,
             inspect.blocks.len(),
             inspect.total_rows,
         );
@@ -146,18 +155,25 @@ fn plan_cmp2(data: &[u8], source_len: u64, source_checksum: u32) -> Result<Repai
         StorageFormat::V2,
         source_len,
         source_checksum,
+        source_digest,
         recovery.valid_len,
         recovery.blocks.len(),
         recovery.total_rows,
     )
 }
 
-fn plan_cmp4(data: &[u8], source_len: u64, source_checksum: u32) -> Result<RepairPlan> {
+fn plan_cmp4(
+    data: &[u8],
+    source_len: u64,
+    source_checksum: u32,
+    source_digest: [u8; 32],
+) -> Result<RepairPlan> {
     if let Ok(footer) = crate::io::v4::validate_file(data) {
         return no_op_plan(
             StorageFormat::V4,
             source_len,
             source_checksum,
+            source_digest,
             footer.row_groups.len(),
             footer.total_row_count,
         );
@@ -168,6 +184,7 @@ fn plan_cmp4(data: &[u8], source_len: u64, source_checksum: u32) -> Result<Repai
         StorageFormat::V4,
         source_len,
         source_checksum,
+        source_digest,
         recovery.valid_body_len,
         recovery.footer.row_groups.len(),
         recovery.footer.total_row_count,
@@ -178,6 +195,7 @@ fn no_op_plan(
     format: StorageFormat,
     source_len: u64,
     source_checksum: u32,
+    source_digest: [u8; 32],
     recovered_units: usize,
     recovered_rows: u64,
 ) -> Result<RepairPlan> {
@@ -186,6 +204,7 @@ fn no_op_plan(
         action: RepairAction::None,
         source_len,
         source_checksum,
+        source_digest,
         recoverable_len: source_len,
         discarded_bytes: 0,
         recovered_units: u64::try_from(recovered_units)
@@ -198,6 +217,7 @@ fn repair_plan(
     format: StorageFormat,
     source_len: u64,
     source_checksum: u32,
+    source_digest: [u8; 32],
     recoverable_len: u64,
     recovered_units: usize,
     recovered_rows: u64,
@@ -215,6 +235,7 @@ fn repair_plan(
         action,
         source_len,
         source_checksum,
+        source_digest,
         recoverable_len,
         discarded_bytes,
         recovered_units: u64::try_from(recovered_units)

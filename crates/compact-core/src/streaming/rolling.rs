@@ -3,10 +3,10 @@
 //! Segments are cut only on valid block boundaries. This keeps every completed
 //! segment independently recoverable and replayable.
 
-use std::io::{BufRead, Cursor};
+use std::io::BufRead;
 
 use crate::schema::Schema;
-use crate::streaming::{BlockOptions, append_jsonl_stream, recover_append_stream};
+use crate::streaming::{BlockOptions, JsonlAppendWriter, read_bounded_jsonl_line};
 use crate::{CompactError, Result};
 
 /// Limits for one rolling append segment.
@@ -50,49 +50,41 @@ pub fn roll_jsonl_append_segments<R: BufRead>(
     block_options: BlockOptions,
     rolling_options: RollingOptions,
 ) -> Result<Vec<Vec<u8>>> {
+    let block_options = block_options.validate()?;
     let rolling_options = rolling_options.validate()?;
     let mut segments = Vec::new();
-    let mut current = Vec::new();
-    let mut line = String::new();
+    let mut current: Option<JsonlAppendWriter<Vec<u8>>> = None;
 
-    loop {
-        line.clear();
-        let read = input.read_line(&mut line)?;
-        if read == 0 {
-            break;
+    while let Some(line) =
+        read_bounded_jsonl_line(&mut input, block_options.max_uncompressed_bytes_per_block)?
+    {
+        if line.trim().is_empty() {
+            continue;
         }
 
-        let candidate = append_jsonl_stream(
-            &current,
-            Cursor::new(line.as_bytes()),
-            schema.clone(),
-            block_options,
-        )?;
-        if should_roll(&candidate, rolling_options)? && !current.is_empty() {
-            segments.push(current);
-            current = append_jsonl_stream(
-                &[],
-                Cursor::new(line.as_bytes()),
+        if current.as_ref().is_some_and(|writer| {
+            writer.metadata().len() >= rolling_options.max_blocks_per_segment
+                || writer.bytes_written() >= rolling_options.max_segment_bytes as u64
+        }) {
+            segments.push(current.take().expect("writer is present").finish()?);
+        }
+
+        let writer = match current.as_mut() {
+            Some(writer) => writer,
+            None => current.insert(JsonlAppendWriter::new(
+                Vec::new(),
                 schema.clone(),
                 block_options,
-            )?;
-        } else {
-            current = candidate;
-        }
+            )?),
+        };
+        writer.write_jsonl_line(&line)?;
     }
 
-    if !current.is_empty() {
-        segments.push(current);
+    if let Some(writer) = current {
+        segments.push(writer.finish()?);
     }
 
     Ok(segments)
-}
-
-fn should_roll(segment: &[u8], options: RollingOptions) -> Result<bool> {
-    let recovery = recover_append_stream(segment)?;
-
-    Ok(segment.len() > options.max_segment_bytes
-        || recovery.blocks.len() > options.max_blocks_per_segment)
 }
 
 #[cfg(test)]

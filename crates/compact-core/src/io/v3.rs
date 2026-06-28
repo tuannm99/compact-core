@@ -15,6 +15,7 @@ use crate::format::v3::{
     ColumnChunkMetadata, decode_column_metadata, decode_header, encode_column_metadata,
     encode_empty_header,
 };
+use crate::limits::MAX_COLLECTION_ENTRIES;
 use crate::primitives::crc32;
 use crate::schema::{ColumnSchema, Schema, SchemaCodec, SchemaValueType};
 use crate::{CompactError, Result};
@@ -206,6 +207,13 @@ pub fn inspect_jsonl(data: &[u8]) -> Result<Inspect> {
     let row_count = read_u64(body, &mut cursor, "cmp3 row count is truncated")?;
     let raw_size = read_u64(body, &mut cursor, "cmp3 raw jsonl size is truncated")?;
     let column_count = read_u32(body, &mut cursor, "cmp3 column count is truncated")? as usize;
+    if column_count > MAX_COLLECTION_ENTRIES
+        || column_count > body.len().saturating_sub(cursor) / size_of::<u32>()
+    {
+        return Err(CompactError::InvalidInput(
+            "cmp3 column count exceeds row group bounds",
+        ));
+    }
     let mut columns = Vec::with_capacity(column_count);
     for _ in 0..column_count {
         let metadata_len = read_u32(
@@ -630,6 +638,20 @@ columns:
         assert!(matches!(
             err,
             CompactError::InvalidInput("cmp3 row group checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn cmp3_inspection_rejects_column_count_beyond_body_bounds() {
+        let mut encoded = encode_jsonl("{\"active\":true}\n", &schema()).unwrap();
+        let column_count_offset = 10 + 4 + 4 * 8;
+        encoded[column_count_offset..column_count_offset + 4]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+        replace_checksum(&mut encoded);
+
+        assert!(matches!(
+            inspect_jsonl(&encoded).unwrap_err(),
+            CompactError::InvalidInput(_)
         ));
     }
 

@@ -8,6 +8,14 @@ fuzz_target!(|data: &[u8]| {
     )
     .expect("static fuzz schema must be valid");
     let _ = compact_core::io::v4::inspect_footer(data);
+    let _ = compact_core::io::v4::validate_file(data);
+    let _ = compact_core::io::v4::recover_file_prefix(data);
+    let _ = compact_core::storage::validate(data);
+    if let Ok(plan) = compact_core::storage::repair::plan(data)
+        && let Ok(repaired) = compact_core::storage::repair::execute(data, &plan)
+    {
+        let _ = compact_core::storage::validate(&repaired);
+    }
     let _ = compact_core::io::v4::decode_jsonl(data, &schema);
     let _ = compact_core::io::v4::decode_jsonl_projected(data, &schema, &["id"]);
     let predicate = compact_core::io::v4::Predicate::U64 {

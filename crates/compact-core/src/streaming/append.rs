@@ -6,9 +6,12 @@
 
 use std::io::{BufRead, Cursor, Write};
 
+use crate::limits::{MAX_ENCODED_BLOCK_BYTES, MAX_STREAM_BLOCKS};
 use crate::primitives::crc32;
 use crate::schema::Schema;
-use crate::streaming::{BLOCK_MAGIC_V1, BlockMetadata, BlockOptions, JsonlBlockWriter};
+use crate::streaming::{
+    BLOCK_MAGIC_V1, BlockMetadata, BlockOptions, JsonlBlockWriter, read_bounded_jsonl_line,
+};
 use crate::{Codec, CompactError, MAGIC_V1, MAGIC_V2, Result, VERSION_V2, framing};
 
 const STREAM_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -76,6 +79,10 @@ impl<W: Write> JsonlAppendWriter<W> {
         self.inner.metadata()
     }
 
+    pub(crate) fn bytes_written(&self) -> u64 {
+        self.inner.bytes_written()
+    }
+
     /// Flush pending rows and return the wrapped writer without closing index.
     pub fn finish(self) -> Result<W> {
         self.inner.finish_without_footer()
@@ -99,20 +106,13 @@ pub fn append_jsonl_stream<R: BufRead>(
         existing[..recovery.valid_len as usize].to_vec()
     };
 
+    let max_line_len = options.max_uncompressed_bytes_per_block;
     let mut writer = if output.is_empty() {
         JsonlAppendWriter::new(output, schema, options)?
     } else {
         JsonlAppendWriter::resume(output, schema, options, &recovery)?
     };
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let read = input.read_line(&mut line)?;
-        if read == 0 {
-            break;
-        }
-
+    while let Some(line) = read_bounded_jsonl_line(&mut input, max_line_len)? {
         writer.write_jsonl_line(&line)?;
     }
 
@@ -129,7 +129,7 @@ pub fn replay_jsonl_append_stream<W: Write>(
 ) -> Result<W> {
     let recovery = recover_append_stream(data)?;
     let prefix = &data[..recovery.valid_len as usize];
-    let mut reader = crate::streaming::JsonlBlockReader::new(Cursor::new(prefix), schema)?;
+    let mut reader = crate::streaming::JsonlBlockReader::new_unsealed(Cursor::new(prefix), schema)?;
 
     while let Some(block) = reader.next_block()? {
         output.write_all(block.jsonl.as_bytes())?;
@@ -194,6 +194,10 @@ pub fn recover_append_stream(data: &[u8]) -> Result<AppendRecovery> {
             truncated_or_corrupt_tail = true;
             break;
         };
+        if payload_len > MAX_ENCODED_BLOCK_BYTES || blocks.len() >= MAX_STREAM_BLOCKS {
+            truncated_or_corrupt_tail = true;
+            break;
+        }
         let Some(record_len) = FRAME_HEADER_LEN.checked_add(payload_len) else {
             truncated_or_corrupt_tail = true;
             break;
@@ -230,15 +234,33 @@ pub fn recover_append_stream(data: &[u8]) -> Result<AppendRecovery> {
             compressed_size: record_len as u64,
             checksum: crc32::checksum(&decoded.payload),
         };
-        expected_block_index += 1;
-        expected_first_row_index += metadata.row_count;
-        cursor += record_len;
+        expected_block_index = expected_block_index
+            .checked_add(1)
+            .ok_or(CompactError::InvalidInput("append block index overflow"))?;
+        expected_first_row_index = expected_first_row_index
+            .checked_add(metadata.row_count)
+            .ok_or(CompactError::InvalidInput("append row count overflow"))?;
+        cursor = cursor
+            .checked_add(record_len)
+            .ok_or(CompactError::InvalidInput("append offset overflow"))?;
         blocks.push(metadata);
     }
 
-    let total_rows = blocks.iter().map(|block| block.row_count).sum();
-    let total_uncompressed_size = blocks.iter().map(|block| block.uncompressed_size).sum();
-    let total_compressed_size = blocks.iter().map(|block| block.compressed_size).sum();
+    let total_rows = checked_total(
+        &blocks,
+        |block| block.row_count,
+        "append row count overflow",
+    )?;
+    let total_uncompressed_size = checked_total(
+        &blocks,
+        |block| block.uncompressed_size,
+        "append uncompressed size overflow",
+    )?;
+    let total_compressed_size = checked_total(
+        &blocks,
+        |block| block.compressed_size,
+        "append compressed size overflow",
+    )?;
 
     Ok(AppendRecovery {
         valid_len: cursor as u64,
@@ -247,6 +269,18 @@ pub fn recover_append_stream(data: &[u8]) -> Result<AppendRecovery> {
         total_uncompressed_size,
         total_compressed_size,
         truncated_or_corrupt_tail,
+    })
+}
+
+fn checked_total(
+    blocks: &[BlockMetadata],
+    value: impl Fn(&BlockMetadata) -> u64,
+    error: &'static str,
+) -> Result<u64> {
+    blocks.iter().try_fold(0u64, |total, block| {
+        total
+            .checked_add(value(block))
+            .ok_or(CompactError::InvalidInput(error))
     })
 }
 

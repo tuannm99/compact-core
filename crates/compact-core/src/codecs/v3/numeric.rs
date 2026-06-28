@@ -8,6 +8,7 @@ use serde_json::{Map, Value};
 
 use super::EncodedColumnChunk;
 use crate::format::v3::ColumnChunkMetadata;
+use crate::limits::MAX_DECODED_VALUES;
 use crate::pipeline::delta_varint;
 use crate::primitives::{bitmap, bitpack};
 use crate::schema::{ColumnSchema, SchemaCodec, SchemaValueType};
@@ -88,6 +89,11 @@ pub fn decode_u64_column(
         metadata.value_count,
         "cmp3 numeric value count is too large",
     )?;
+    if value_count > MAX_DECODED_VALUES {
+        return Err(CompactError::InvalidInput(
+            "cmp3 numeric value count exceeds configured limit",
+        ));
+    }
     let null_count = usize_count(metadata.null_count, "cmp3 numeric null count is too large")?;
     let non_null_count = value_count
         .checked_sub(null_count)

@@ -15,17 +15,18 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 use crate::io::{decode_jsonl, encode_jsonl_row_group};
+use crate::limits::{MAX_PARALLEL_WORKERS, MAX_STREAM_BLOCKS};
 use crate::primitives::crc32;
 use crate::schema::Schema;
 use crate::streaming::reader::{
-    STREAM_HEADER_LEN, StreamRecord, count_jsonl_rows, parse_block_payload, read_next_record_from,
-    usize_to_u64 as reader_usize_to_u64, validate_stream_header,
+    STREAM_HEADER_LEN, StreamRecord, count_jsonl_rows, ensure_reader_eof, parse_block_payload,
+    read_next_record_from, usize_to_u64 as reader_usize_to_u64, validate_stream_header,
 };
 use crate::streaming::writer::{
     FILE_HEADER_LEN, encode_block_payload, normalize_jsonl_line, write_index_footer,
     write_stream_header,
 };
-use crate::streaming::{BlockMetadata, BlockOptions};
+use crate::streaming::{BlockMetadata, BlockOptions, read_bounded_jsonl_line};
 use crate::{Codec, CompactError, Result, framing};
 
 /// Configuration for the v0.8 parallel block encoder.
@@ -77,6 +78,11 @@ impl ParallelDecodeOptions {
             ));
         }
 
+        if self.worker_count > MAX_PARALLEL_WORKERS {
+            return Err(CompactError::InvalidInput(
+                "parallel worker count exceeds configured limit",
+            ));
+        }
         Ok(self)
     }
 }
@@ -100,6 +106,11 @@ impl ParallelOptions {
             ));
         }
 
+        if self.worker_count > MAX_PARALLEL_WORKERS {
+            return Err(CompactError::InvalidInput(
+                "parallel worker count exceeds configured limit",
+            ));
+        }
         Ok(Self {
             worker_count: self.worker_count,
             block_options: self.block_options.validate()?,
@@ -126,7 +137,7 @@ impl Default for ParallelOptions {
 /// inspector. Only block scheduling changes: input collection stays ordered,
 /// block encode runs in parallel, and the collector writes frames plus the
 /// `IDX1` footer in logical block order.
-pub fn encode_jsonl_stream_parallel<R: BufRead, W: Write>(
+pub fn encode_jsonl_stream_parallel<R: BufRead + Send, W: Write>(
     mut input: R,
     mut output: W,
     schema: Schema,
@@ -135,24 +146,51 @@ pub fn encode_jsonl_stream_parallel<R: BufRead, W: Write>(
     let options = options.validate()?;
     write_stream_header(&mut output)?;
 
-    let (job_tx, job_rx) = mpsc::sync_channel(options.worker_count * 2);
-    let (result_tx, result_rx) = mpsc::channel();
+    let channel_capacity =
+        options
+            .worker_count
+            .checked_mul(2)
+            .ok_or(CompactError::InvalidInput(
+                "parallel channel capacity overflow",
+            ))?;
+    let (job_tx, job_rx) = mpsc::sync_channel(channel_capacity);
+    let (result_tx, result_rx) = mpsc::sync_channel(channel_capacity);
     let job_rx = Arc::new(Mutex::new(job_rx));
 
-    let job_count = thread::scope(|scope| -> Result<u64> {
+    thread::scope(|scope| -> Result<()> {
+        let mut workers = Vec::with_capacity(options.worker_count);
         for _ in 0..options.worker_count {
             let schema = schema.clone();
             let job_rx = Arc::clone(&job_rx);
             let result_tx = result_tx.clone();
 
-            scope.spawn(move || worker_loop(schema, job_rx, result_tx));
+            workers.push(
+                thread::Builder::new()
+                    .name("compact-encode-worker".to_owned())
+                    .spawn_scoped(scope, move || worker_loop(schema, job_rx, result_tx))
+                    .map_err(CompactError::Io)?,
+            );
         }
+        drop(job_rx);
         drop(result_tx);
 
-        schedule_jobs(&mut input, options.block_options, job_tx)
+        let scheduler = thread::Builder::new()
+            .name("compact-encode-scheduler".to_owned())
+            .spawn_scoped(scope, move || {
+                schedule_jobs(&mut input, options.block_options, job_tx)
+            })
+            .map_err(CompactError::Io)?;
+        let collected = collect_results(result_rx, &mut output);
+        let job_count = join_scoped(scheduler)?;
+        join_workers(workers)?;
+        let (result_count, metadata) = collected?;
+        if result_count != job_count {
+            return Err(CompactError::InvalidInput(
+                "parallel block results are incomplete",
+            ));
+        }
+        write_index_footer(&mut output, &metadata)
     })?;
-
-    collect_results(result_rx, job_count, &mut output)?;
 
     Ok(output)
 }
@@ -162,7 +200,7 @@ pub fn encode_jsonl_stream_parallel<R: BufRead, W: Write>(
 /// The scanner reads frames sequentially and validates frame checksums plus
 /// block metadata before work is dispatched. Worker threads decode column-block
 /// payloads independently, and the collector writes JSONL in block order.
-pub fn decode_jsonl_stream_parallel<R: Read, W: Write>(
+pub fn decode_jsonl_stream_parallel<R: Read + Send, W: Write>(
     mut input: R,
     mut output: W,
     schema: Schema,
@@ -171,24 +209,49 @@ pub fn decode_jsonl_stream_parallel<R: Read, W: Write>(
     let options = options.validate()?;
     validate_stream_header(&mut input)?;
 
-    let (job_tx, job_rx) = mpsc::sync_channel(options.worker_count * 2);
-    let (result_tx, result_rx) = mpsc::channel();
+    let channel_capacity =
+        options
+            .worker_count
+            .checked_mul(2)
+            .ok_or(CompactError::InvalidInput(
+                "parallel channel capacity overflow",
+            ))?;
+    let (job_tx, job_rx) = mpsc::sync_channel(channel_capacity);
+    let (result_tx, result_rx) = mpsc::sync_channel(channel_capacity);
     let job_rx = Arc::new(Mutex::new(job_rx));
 
-    let job_count = thread::scope(|scope| -> Result<u64> {
+    thread::scope(|scope| -> Result<()> {
+        let mut workers = Vec::with_capacity(options.worker_count);
         for _ in 0..options.worker_count {
             let schema = schema.clone();
             let job_rx = Arc::clone(&job_rx);
             let result_tx = result_tx.clone();
 
-            scope.spawn(move || decode_worker_loop(schema, job_rx, result_tx));
+            workers.push(
+                thread::Builder::new()
+                    .name("compact-decode-worker".to_owned())
+                    .spawn_scoped(scope, move || decode_worker_loop(schema, job_rx, result_tx))
+                    .map_err(CompactError::Io)?,
+            );
         }
+        drop(job_rx);
         drop(result_tx);
 
-        schedule_decode_jobs(&mut input, job_tx)
+        let scheduler = thread::Builder::new()
+            .name("compact-decode-scheduler".to_owned())
+            .spawn_scoped(scope, move || schedule_decode_jobs(&mut input, job_tx))
+            .map_err(CompactError::Io)?;
+        let collected = collect_decode_results(result_rx, &mut output);
+        let job_count = join_scoped(scheduler)?;
+        join_workers(workers)?;
+        let result_count = collected?;
+        if result_count != job_count {
+            return Err(CompactError::InvalidInput(
+                "parallel block results are incomplete",
+            ));
+        }
+        Ok(())
     })?;
-
-    collect_decode_results(result_rx, job_count, &mut output)?;
 
     Ok(output)
 }
@@ -196,25 +259,135 @@ pub fn decode_jsonl_stream_parallel<R: Read, W: Write>(
 /// Decode a CMP2 JSONL stream and write the ordered result to an async sink.
 ///
 /// This keeps v0.8's async writer contract independent from a specific runtime.
-/// The current implementation reuses the checked parallel decoder, then awaits
-/// one ordered write. Runtime-specific adapters can later stream chunks without
-/// changing the trait contract.
-pub async fn decode_jsonl_stream_parallel_async_writer<R: Read, W: AsyncJsonlSink>(
-    input: R,
+/// Each independently bounded block is decoded and awaited before the next one,
+/// so sink backpressure bounds memory and cancellation stops further reads.
+pub async fn decode_jsonl_stream_parallel_async_writer<R: Read + Send, W: AsyncJsonlSink>(
+    mut input: R,
     mut output: W,
     schema: Schema,
     options: ParallelDecodeOptions,
 ) -> Result<W> {
-    let decoded = decode_jsonl_stream_parallel(input, Vec::new(), schema, options)?;
-    output.write_all(&decoded).await?;
+    let options = options.validate()?;
+    validate_stream_header(&mut input)?;
+    let mut next_offset = STREAM_HEADER_LEN as u64;
+    let mut expected_block_index = 0u64;
+    let mut expected_first_row_index = 0u64;
+    let mut metadata = Vec::new();
+    let mut finished = false;
+
+    while !finished {
+        let mut jobs = Vec::with_capacity(options.worker_count);
+        while jobs.len() < options.worker_count && !finished {
+            let frame = match read_next_record_from(&mut input)? {
+                StreamRecord::Frame(frame) => frame,
+                StreamRecord::Index(index) => {
+                    if index != metadata {
+                        return Err(CompactError::InvalidInput(
+                            "footer index does not match scanned blocks",
+                        ));
+                    }
+                    ensure_reader_eof(&mut input)?;
+                    finished = true;
+                    continue;
+                }
+                StreamRecord::Eof => {
+                    return Err(CompactError::InvalidInput(
+                        "sealed stream footer is missing",
+                    ));
+                }
+            };
+            let frame_len = frame.len();
+            let decoded = framing::decode_v1(&frame)?;
+            if decoded.codec != Codec::ColumnBlock {
+                return Err(CompactError::InvalidInput(
+                    "stream block frame must use column block codec",
+                ));
+            }
+            let parsed = parse_block_payload(&decoded.payload)?;
+            if parsed.block_index != expected_block_index
+                || parsed.first_row_index != expected_first_row_index
+            {
+                return Err(CompactError::InvalidInput(
+                    "stream block metadata is not sequential",
+                ));
+            }
+            if metadata.len() >= MAX_STREAM_BLOCKS {
+                return Err(CompactError::InvalidInput(
+                    "stream block count exceeds configured limit",
+                ));
+            }
+
+            let block_metadata = BlockMetadata {
+                block_index: parsed.block_index,
+                encoded_offset: next_offset,
+                row_count: reader_usize_to_u64(parsed.row_count, "row count is too large")?,
+                uncompressed_size: reader_usize_to_u64(parsed.raw_size, "row group is too large")?,
+                compressed_size: reader_usize_to_u64(frame_len, "block frame is too large")?,
+                checksum: crc32::checksum(&decoded.payload),
+            };
+            jobs.push(DecodeJob {
+                block_index: parsed.block_index,
+                first_row_index: parsed.first_row_index,
+                row_count: parsed.row_count,
+                raw_size: parsed.raw_size,
+                column_block: parsed.column_block.to_vec(),
+            });
+            expected_block_index = expected_block_index
+                .checked_add(1)
+                .ok_or(CompactError::InvalidInput("parallel block index overflow"))?;
+            expected_first_row_index = expected_first_row_index
+                .checked_add(block_metadata.row_count)
+                .ok_or(CompactError::InvalidInput("parallel row count overflow"))?;
+            next_offset = next_offset
+                .checked_add(block_metadata.compressed_size)
+                .ok_or(CompactError::InvalidInput(
+                    "parallel stream offset overflow",
+                ))?;
+            metadata.push(block_metadata);
+        }
+
+        for decoded in decode_batch(&schema, jobs)? {
+            output.write_all(decoded.jsonl.as_bytes()).await?;
+        }
+    }
 
     Ok(output)
+}
+
+fn decode_batch(schema: &Schema, jobs: Vec<DecodeJob>) -> Result<Vec<DecodedBlockJob>> {
+    let mut decoded = thread::scope(|scope| -> Result<Vec<DecodedBlockJob>> {
+        let mut workers = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            workers.push(
+                thread::Builder::new()
+                    .name("compact-async-decode-worker".to_owned())
+                    .spawn_scoped(scope, move || decode_job(schema, job))
+                    .map_err(CompactError::Io)?,
+            );
+        }
+
+        let mut decoded = Vec::with_capacity(workers.len());
+        let mut first_error = None;
+        for worker in workers {
+            match join_scoped(worker) {
+                Ok(block) => decoded.push(block),
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(decoded),
+        }
+    })?;
+    decoded.sort_unstable_by_key(|block| block.block_index);
+    Ok(decoded)
 }
 
 fn worker_loop(
     schema: Schema,
     job_rx: Arc<Mutex<mpsc::Receiver<RowGroupJob>>>,
-    result_tx: mpsc::Sender<Result<EncodedBlock>>,
+    result_tx: mpsc::SyncSender<Result<EncodedBlock>>,
 ) {
     loop {
         let job = match job_rx.lock() {
@@ -243,17 +416,11 @@ fn schedule_jobs<R: BufRead>(
     job_tx: mpsc::SyncSender<RowGroupJob>,
 ) -> Result<u64> {
     let mut current = PendingRowGroup::default();
-    let mut line = String::new();
     let mut next_block_index = 0u64;
     let mut next_row_index = 0u64;
 
-    loop {
-        line.clear();
-        let read = input.read_line(&mut line)?;
-        if read == 0 {
-            break;
-        }
-
+    while let Some(line) = read_bounded_jsonl_line(input, options.max_uncompressed_bytes_per_block)?
+    {
         if line.trim().is_empty() {
             continue;
         }
@@ -268,8 +435,12 @@ fn schedule_jobs<R: BufRead>(
         if current.would_exceed(&line, options) {
             let (job, row_count) = current.take_job(next_block_index, next_row_index);
             send_job(&job_tx, job)?;
-            next_block_index += 1;
-            next_row_index += row_count;
+            next_block_index = next_block_index
+                .checked_add(1)
+                .ok_or(CompactError::InvalidInput("parallel block index overflow"))?;
+            next_row_index = next_row_index
+                .checked_add(row_count)
+                .ok_or(CompactError::InvalidInput("parallel row count overflow"))?;
         }
 
         current.push_line(&line);
@@ -277,15 +448,21 @@ fn schedule_jobs<R: BufRead>(
         if current.reached_limit(options) {
             let (job, row_count) = current.take_job(next_block_index, next_row_index);
             send_job(&job_tx, job)?;
-            next_block_index += 1;
-            next_row_index += row_count;
+            next_block_index = next_block_index
+                .checked_add(1)
+                .ok_or(CompactError::InvalidInput("parallel block index overflow"))?;
+            next_row_index = next_row_index
+                .checked_add(row_count)
+                .ok_or(CompactError::InvalidInput("parallel row count overflow"))?;
         }
     }
 
     if !current.is_empty() {
         let (job, _) = current.take_job(next_block_index, next_row_index);
         send_job(&job_tx, job)?;
-        next_block_index += 1;
+        next_block_index = next_block_index
+            .checked_add(1)
+            .ok_or(CompactError::InvalidInput("parallel block index overflow"))?;
     }
 
     drop(job_tx);
@@ -323,18 +500,20 @@ fn encode_job(schema: &Schema, job: RowGroupJob) -> Result<EncodedBlock> {
 
 fn collect_results<W: Write>(
     result_rx: mpsc::Receiver<Result<EncodedBlock>>,
-    job_count: u64,
     output: &mut W,
-) -> Result<()> {
+) -> Result<(u64, Vec<BlockMetadata>)> {
     let mut pending = BTreeMap::new();
     let mut next_to_write = 0u64;
     let mut bytes_written = FILE_HEADER_LEN;
     let mut metadata = Vec::new();
 
-    for _ in 0..job_count {
-        let encoded = result_rx
-            .recv()
-            .map_err(|_| CompactError::InvalidInput("parallel worker pool stopped"))??;
+    let mut result_count = 0u64;
+
+    while let Ok(encoded) = result_rx.recv() {
+        let encoded = encoded?;
+        result_count = result_count
+            .checked_add(1)
+            .ok_or(CompactError::InvalidInput("parallel result count overflow"))?;
         pending.insert(encoded.block_index, encoded);
 
         while let Some(encoded) = pending.remove(&next_to_write) {
@@ -352,23 +531,25 @@ fn collect_results<W: Write>(
                 .checked_add(encoded.compressed_size)
                 .ok_or(CompactError::InvalidInput("stream size overflow"))?;
             metadata.push(block_metadata);
-            next_to_write += 1;
+            next_to_write = next_to_write
+                .checked_add(1)
+                .ok_or(CompactError::InvalidInput("parallel block index overflow"))?;
         }
     }
 
-    if next_to_write != job_count {
+    if next_to_write != result_count || !pending.is_empty() {
         return Err(CompactError::InvalidInput(
             "parallel block results are incomplete",
         ));
     }
 
-    write_index_footer(output, &metadata)
+    Ok((result_count, metadata))
 }
 
 fn decode_worker_loop(
     schema: Schema,
     job_rx: Arc<Mutex<mpsc::Receiver<DecodeJob>>>,
-    result_tx: mpsc::Sender<Result<DecodedBlockJob>>,
+    result_tx: mpsc::SyncSender<Result<DecodedBlockJob>>,
 ) {
     loop {
         let job = match job_rx.lock() {
@@ -409,9 +590,14 @@ fn schedule_decode_jobs<R: Read>(
                         "footer index does not match scanned blocks",
                     ));
                 }
+                ensure_reader_eof(input)?;
                 break;
             }
-            StreamRecord::Eof => break,
+            StreamRecord::Eof => {
+                return Err(CompactError::InvalidInput(
+                    "sealed stream footer is missing",
+                ));
+            }
         };
         let frame_len = frame.len();
         let decoded = framing::decode_v1(&frame)?;
@@ -442,6 +628,11 @@ fn schedule_decode_jobs<R: Read>(
             compressed_size: reader_usize_to_u64(frame_len, "block frame is too large")?,
             checksum: crc32::checksum(&decoded.payload),
         };
+        if metadata.len() >= MAX_STREAM_BLOCKS {
+            return Err(CompactError::InvalidInput(
+                "stream block count exceeds configured limit",
+            ));
+        }
         let job = DecodeJob {
             block_index: parsed.block_index,
             first_row_index: parsed.first_row_index,
@@ -451,9 +642,17 @@ fn schedule_decode_jobs<R: Read>(
         };
 
         send_decode_job(&job_tx, job)?;
-        expected_block_index += 1;
-        expected_first_row_index += block_metadata.row_count;
-        next_offset += block_metadata.compressed_size;
+        expected_block_index = expected_block_index
+            .checked_add(1)
+            .ok_or(CompactError::InvalidInput("parallel block index overflow"))?;
+        expected_first_row_index = expected_first_row_index
+            .checked_add(block_metadata.row_count)
+            .ok_or(CompactError::InvalidInput("parallel row count overflow"))?;
+        next_offset = next_offset
+            .checked_add(block_metadata.compressed_size)
+            .ok_or(CompactError::InvalidInput(
+                "parallel stream offset overflow",
+            ))?;
         metadata.push(block_metadata);
     }
 
@@ -492,17 +691,19 @@ fn decode_job(schema: &Schema, job: DecodeJob) -> Result<DecodedBlockJob> {
 
 fn collect_decode_results<W: Write>(
     result_rx: mpsc::Receiver<Result<DecodedBlockJob>>,
-    job_count: u64,
     output: &mut W,
-) -> Result<()> {
+) -> Result<u64> {
     let mut pending = BTreeMap::new();
     let mut next_to_write = 0u64;
     let mut next_row_index = 0u64;
 
-    for _ in 0..job_count {
-        let decoded = result_rx
-            .recv()
-            .map_err(|_| CompactError::InvalidInput("parallel worker pool stopped"))??;
+    let mut result_count = 0u64;
+
+    while let Ok(decoded) = result_rx.recv() {
+        let decoded = decoded?;
+        result_count = result_count
+            .checked_add(1)
+            .ok_or(CompactError::InvalidInput("parallel result count overflow"))?;
         pending.insert(decoded.block_index, decoded);
 
         while let Some(decoded) = pending.remove(&next_to_write) {
@@ -513,17 +714,36 @@ fn collect_decode_results<W: Write>(
             }
 
             output.write_all(decoded.jsonl.as_bytes())?;
-            next_row_index += count_jsonl_rows(&decoded.jsonl) as u64;
-            next_to_write += 1;
+            next_row_index = next_row_index
+                .checked_add(count_jsonl_rows(&decoded.jsonl) as u64)
+                .ok_or(CompactError::InvalidInput("parallel row count overflow"))?;
+            next_to_write = next_to_write
+                .checked_add(1)
+                .ok_or(CompactError::InvalidInput("parallel block index overflow"))?;
         }
     }
 
-    if next_to_write != job_count {
+    if next_to_write != result_count || !pending.is_empty() {
         return Err(CompactError::InvalidInput(
             "parallel block results are incomplete",
         ));
     }
 
+    Ok(result_count)
+}
+
+fn join_scoped<T>(handle: thread::ScopedJoinHandle<'_, Result<T>>) -> Result<T> {
+    handle
+        .join()
+        .map_err(|_| CompactError::InvalidInput("parallel scheduler panicked"))?
+}
+
+fn join_workers(workers: Vec<thread::ScopedJoinHandle<'_, ()>>) -> Result<()> {
+    for worker in workers {
+        worker
+            .join()
+            .map_err(|_| CompactError::InvalidInput("parallel worker panicked"))?;
+    }
     Ok(())
 }
 
@@ -615,12 +835,15 @@ fn usize_to_u64(value: usize, err: &'static str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::io::Cursor;
+    use std::task::{Context, Poll, Waker};
 
     use super::{
         ParallelDecodeOptions, ParallelOptions, decode_jsonl_stream_parallel,
-        encode_jsonl_stream_parallel,
+        decode_jsonl_stream_parallel_async_writer, encode_jsonl_stream_parallel,
     };
+    use crate::limits::MAX_PARALLEL_WORKERS;
     use crate::streaming::{BlockOptions, decode_jsonl_stream, inspect_stream};
     use crate::{CompactError, schema::Schema};
 
@@ -650,6 +873,15 @@ columns:
             ));
         }
         jsonl
+    }
+
+    fn run_ready<F: Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("test future unexpectedly yielded"),
+        }
     }
 
     #[test]
@@ -716,6 +948,22 @@ columns:
     }
 
     #[test]
+    fn excessive_worker_count_is_rejected_before_output() {
+        let error = encode_jsonl_stream_parallel(
+            Cursor::new(input(1)),
+            Vec::new(),
+            schema(),
+            ParallelOptions {
+                worker_count: MAX_PARALLEL_WORKERS + 1,
+                block_options: BlockOptions::default(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CompactError::InvalidInput(_)));
+    }
+
+    #[test]
     fn worker_encode_error_is_returned() {
         let options = ParallelOptions {
             worker_count: 2,
@@ -767,6 +1015,34 @@ columns:
     }
 
     #[test]
+    fn async_parallel_decode_writes_ordered_bounded_blocks() {
+        let input = input(12);
+        let encoded = encode_jsonl_stream_parallel(
+            Cursor::new(&input),
+            Vec::new(),
+            schema(),
+            ParallelOptions {
+                worker_count: 3,
+                block_options: BlockOptions {
+                    max_rows_per_block: 2,
+                    max_uncompressed_bytes_per_block: 1024,
+                },
+            },
+        )
+        .unwrap();
+
+        let decoded = run_ready(decode_jsonl_stream_parallel_async_writer(
+            Cursor::new(encoded),
+            Vec::new(),
+            schema(),
+            ParallelDecodeOptions { worker_count: 3 },
+        ))
+        .unwrap();
+
+        assert_eq!(String::from_utf8(decoded).unwrap(), input);
+    }
+
+    #[test]
     fn parallel_decode_rejects_invalid_worker_count() {
         let err = decode_jsonl_stream_parallel(
             Cursor::new(Vec::<u8>::new()),
@@ -812,6 +1088,28 @@ columns:
         .unwrap_err();
 
         assert!(matches!(err, CompactError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn parallel_decode_rejects_trailing_bytes_after_footer() {
+        let mut encoded = encode_jsonl_stream_parallel(
+            Cursor::new(input(2)),
+            Vec::new(),
+            schema(),
+            ParallelOptions::default(),
+        )
+        .unwrap();
+        encoded.push(0xff);
+
+        let error = decode_jsonl_stream_parallel(
+            Cursor::new(encoded),
+            Vec::new(),
+            schema(),
+            ParallelDecodeOptions::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CompactError::InvalidInput(_)));
     }
 
     #[test]

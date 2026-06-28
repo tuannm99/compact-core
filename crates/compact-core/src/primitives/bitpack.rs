@@ -1,4 +1,5 @@
 use crate::CompactError;
+use crate::limits::MAX_DECODED_VALUES;
 
 /// Pack `u64` values using a fixed number of bits per value.
 ///
@@ -71,6 +72,12 @@ pub fn decode_u64(
     value_count: usize,
 ) -> Result<Vec<u64>, CompactError> {
     validate_bit_width(bit_width)?;
+
+    if value_count > MAX_DECODED_VALUES {
+        return Err(CompactError::InvalidInput(
+            "bit-packed value count exceeds configured limit",
+        ));
+    }
 
     let total_bits =
         value_count
@@ -156,6 +163,7 @@ fn reject_non_zero_padding(data: &[u8], used_bits: usize) -> Result<(), CompactE
 mod tests {
     use super::{decode_u64, encode_u64};
     use crate::CompactError;
+    use crate::limits::MAX_DECODED_VALUES;
 
     #[test]
     fn bitpack_zero_values() {
@@ -164,6 +172,13 @@ mod tests {
 
         assert_eq!(encoded, Vec::<u8>::new());
         assert_eq!(decoded, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn bitpack_rejects_excessive_zero_width_value_count() {
+        let err = decode_u64(&[], 0, MAX_DECODED_VALUES + 1).unwrap_err();
+
+        assert!(matches!(err, CompactError::InvalidInput(_)));
     }
 
     #[test]

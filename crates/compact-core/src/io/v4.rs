@@ -17,6 +17,7 @@ use crate::io::v3::{
     DecodedColumn, decode_column, encode_column, parse_rows, validate_implemented_schema,
     validate_metadata_against_schema,
 };
+use crate::limits::MAX_COLLECTION_ENTRIES;
 use crate::primitives::crc32;
 use crate::schema::{ColumnSchema, Schema, SchemaValueType};
 use crate::statistics::ColumnStatistics;
@@ -147,14 +148,13 @@ pub fn scan_jsonl(
             continue;
         }
 
-        let verify_full_checksum = projection.is_empty() && predicate.is_none();
         let decoded = decode_row_group_projection(
             data,
             row_group,
             columns,
             &projected_columns,
             predicate,
-            verify_full_checksum,
+            true,
         )?;
         render_filtered_rows(&mut jsonl, &projected_columns, &decoded, predicate)?;
         row_groups_scanned += 1;
@@ -295,6 +295,13 @@ fn recover_row_group(
         "cmp4 column count is truncated",
     )?)
     .map_err(|_| CompactError::InvalidInput("cmp4 column count is too large"))?;
+    if column_count > MAX_COLLECTION_ENTRIES
+        || column_count > data.len().saturating_sub(cursor) / size_of::<u32>()
+    {
+        return Err(CompactError::InvalidInput(
+            "cmp4 column count exceeds row group bounds",
+        ));
+    }
     let mut columns = Vec::with_capacity(column_count);
     let mut names = HashSet::new();
 
@@ -878,7 +885,8 @@ impl DecodedSelection {
 mod tests {
     use super::{
         EncodeOptions, Predicate, U64PredicateOp, decode_jsonl, decode_jsonl_projected,
-        encode_jsonl, inspect_footer, recover_file_prefix, scan_jsonl, validate_file,
+        encode_jsonl, inspect_footer, recover_file_prefix, recover_row_group, scan_jsonl,
+        validate_file,
     };
     use crate::CompactError;
     use crate::schema::Schema;
@@ -964,6 +972,20 @@ columns:
     }
 
     #[test]
+    fn cmp4_recovery_rejects_column_count_beyond_remaining_bytes() {
+        let mut encoded =
+            encode_jsonl(input(), &schema(), EncodeOptions { row_group_rows: 2 }).unwrap();
+        let column_count_offset = 10 + 4 + 4 * 8;
+        encoded[column_count_offset..column_count_offset + 4]
+            .copy_from_slice(&u32::MAX.to_le_bytes());
+
+        assert!(matches!(
+            recover_row_group(&encoded, 10, 0, 0).unwrap_err(),
+            CompactError::InvalidInput(_)
+        ));
+    }
+
+    #[test]
     fn cmp4_projection_decodes_only_selected_columns() {
         let encoded =
             encode_jsonl(input(), &schema(), EncodeOptions { row_group_rows: 2 }).unwrap();
@@ -976,20 +998,14 @@ columns:
     }
 
     #[test]
-    fn cmp4_projection_does_not_read_unselected_payloads() {
+    fn cmp4_projection_authenticates_unselected_payloads() {
         let mut encoded =
             encode_jsonl(input(), &schema(), EncodeOptions { row_group_rows: 2 }).unwrap();
         let footer = inspect_footer(&encoded).unwrap();
         let active_payload_offset = footer.row_groups[0].columns[1].payload_offset as usize;
         encoded[active_payload_offset] ^= 0xff;
 
-        let projected = decode_jsonl_projected(&encoded, &schema(), &["id", "service"]).unwrap();
-        assert_eq!(
-            projected,
-            "{\"id\":1,\"service\":\"api\"}\n{\"id\":2,\"service\":\"api\"}\n{\"id\":10,\"service\":null}\n{\"id\":11,\"service\":\"worker\"}\n"
-        );
-
-        let err = decode_jsonl(&encoded, &schema()).unwrap_err();
+        let err = decode_jsonl_projected(&encoded, &schema(), &["id", "service"]).unwrap_err();
         assert!(matches!(
             err,
             CompactError::InvalidInput("cmp4 row group checksum mismatch")

@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 
+use crate::limits::MAX_COLLECTION_ENTRIES;
 use crate::{CompactError, MAGIC_V4, Result, VERSION_V4, checksum32};
 
 const FILE_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -200,10 +201,17 @@ pub fn decode_footer(file: &[u8]) -> Result<FooterIndex> {
     let mut cursor = 0usize;
     let total_row_count = read_u64(footer, &mut cursor, "cmp4 total row count is truncated")?;
     let row_group_count = read_u64(footer, &mut cursor, "cmp4 row group count is truncated")?;
-    let mut row_groups = Vec::with_capacity(
-        usize::try_from(row_group_count)
-            .map_err(|_| CompactError::InvalidInput("cmp4 row group count is too large"))?,
-    );
+    let row_group_count = usize::try_from(row_group_count)
+        .map_err(|_| CompactError::InvalidInput("cmp4 row group count is too large"))?;
+    const MIN_ROW_GROUP_ENTRY_LEN: usize = 5 * 8 + 4;
+    if row_group_count > MAX_COLLECTION_ENTRIES
+        || row_group_count > footer.len().saturating_sub(cursor) / MIN_ROW_GROUP_ENTRY_LEN
+    {
+        return Err(CompactError::InvalidInput(
+            "cmp4 row group count exceeds footer bounds",
+        ));
+    }
+    let mut row_groups = Vec::with_capacity(row_group_count);
 
     for _ in 0..row_group_count {
         let row_group_index = read_u64(footer, &mut cursor, "cmp4 row group index is truncated")?;
@@ -211,11 +219,17 @@ pub fn decode_footer(file: &[u8]) -> Result<FooterIndex> {
         let row_count = read_u64(footer, &mut cursor, "cmp4 row count is truncated")?;
         let row_group_offset = read_u64(footer, &mut cursor, "cmp4 row group offset is truncated")?;
         let row_group_len = read_u64(footer, &mut cursor, "cmp4 row group length is truncated")?;
-        let column_count = read_u32(footer, &mut cursor, "cmp4 column count is truncated")?;
-        let mut columns = Vec::with_capacity(
-            usize::try_from(column_count)
-                .map_err(|_| CompactError::InvalidInput("cmp4 column count is too large"))?,
-        );
+        let column_count =
+            read_u32(footer, &mut cursor, "cmp4 column count is truncated")? as usize;
+        const MIN_COLUMN_ENTRY_LEN: usize = 2 + 1 + 6 * 8 + 4;
+        if column_count > MAX_COLLECTION_ENTRIES
+            || column_count > footer.len().saturating_sub(cursor) / MIN_COLUMN_ENTRY_LEN
+        {
+            return Err(CompactError::InvalidInput(
+                "cmp4 column count exceeds footer bounds",
+            ));
+        }
+        let mut columns = Vec::with_capacity(column_count);
 
         for _ in 0..column_count {
             let name_len =
@@ -635,6 +649,27 @@ mod tests {
             err,
             CompactError::InvalidInput("cmp4 footer checksum mismatch")
         ));
+    }
+
+    #[test]
+    fn cmp4_footer_rejects_counts_beyond_available_records() {
+        for count_offset in [8usize, 8 + 8 + 5 * 8] {
+            let expected = index();
+            let mut file = encode_empty_header();
+            file.resize(210, 0);
+            let trailer = append_footer(&mut file, &expected).unwrap();
+            let footer_start = trailer.footer_offset as usize;
+            let trailer_start = file.len() - super::FOOTER_TRAILER_LEN;
+            let width = if count_offset == 8 { 8 } else { 4 };
+            file[footer_start + count_offset..footer_start + count_offset + width].fill(0xff);
+            let checksum = checksum32(&file[footer_start..trailer_start]);
+            file[trailer_start + 16..trailer_start + 20].copy_from_slice(&checksum.to_le_bytes());
+
+            assert!(matches!(
+                decode_footer(&file).unwrap_err(),
+                CompactError::InvalidInput(_)
+            ));
+        }
     }
 
     #[test]

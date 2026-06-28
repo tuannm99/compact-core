@@ -10,8 +10,8 @@ use std::collections::{BTreeMap, HashSet};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
-use crate::schema::ColumnSchema;
 use crate::schema::evolution::SchemaRevision;
+use crate::schema::{ColumnSchema, SchemaCodec, SchemaValueType};
 use crate::{CompactError, Result, checksum32};
 
 const METADATA_VERSION_V1: u64 = 1;
@@ -37,7 +37,9 @@ pub struct MigrationPlan {
     pub target_version: u64,
     pub action: MigrationAction,
     pub source_len: u64,
+    /// Diagnostic checksum for logs; plan execution uses the private BLAKE3 digest.
     pub source_checksum: u32,
+    source_digest: [u8; 32],
     pub column_count: u64,
     migrated: Vec<u8>,
 }
@@ -46,7 +48,30 @@ pub struct MigrationPlan {
 struct LegacyMetadata {
     metadata_version: u64,
     revision: u64,
-    columns: Vec<ColumnSchema>,
+    columns: Vec<LegacyColumn>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LegacyColumn {
+    name: String,
+    #[serde(rename = "type")]
+    value_type: SchemaValueType,
+    codec: SchemaCodec,
+    #[serde(default)]
+    nullable: bool,
+    #[serde(flatten)]
+    _extensions: BTreeMap<String, Value>,
+}
+
+impl LegacyColumn {
+    fn runtime_schema(&self) -> ColumnSchema {
+        ColumnSchema {
+            name: self.name.clone(),
+            value_type: self.value_type,
+            codec: self.codec,
+            nullable: self.nullable,
+        }
+    }
 }
 
 /// Build a deterministic v1-to-v2 plan without changing the source.
@@ -57,6 +82,7 @@ pub fn plan(source: &[u8], assignments: &MigrationAssignments) -> Result<Migrati
     let source_len = u64::try_from(source.len())
         .map_err(|_| CompactError::InvalidInput("metadata source is too large"))?;
     let source_checksum = checksum32(source);
+    let source_digest = *blake3::hash(source).as_bytes();
     let text = std::str::from_utf8(source)
         .map_err(|_| CompactError::InvalidInput("metadata source must be utf-8"))?;
     let mut document: Value = serde_yaml::from_str(text)
@@ -70,11 +96,16 @@ pub fn plan(source: &[u8], assignments: &MigrationAssignments) -> Result<Migrati
             if legacy.metadata_version != METADATA_VERSION_V1 || legacy.revision == 0 {
                 return Err(CompactError::InvalidInput("invalid v1 metadata revision"));
             }
+            let runtime_columns = legacy
+                .columns
+                .iter()
+                .map(LegacyColumn::runtime_schema)
+                .collect::<Vec<_>>();
             crate::schema::Schema {
-                columns: legacy.columns.clone(),
+                columns: runtime_columns.clone(),
             }
             .supported_columns_v3()?;
-            validate_assignments(&legacy.columns, assignments)?;
+            validate_assignments(&runtime_columns, assignments)?;
             add_stable_ids(&mut document, assignments)?;
             set_metadata_version(&mut document, METADATA_VERSION_V2)?;
             let migrated = serde_yaml::to_string(&document)
@@ -88,6 +119,7 @@ pub fn plan(source: &[u8], assignments: &MigrationAssignments) -> Result<Migrati
                 action: MigrationAction::AddStableColumnIds,
                 source_len,
                 source_checksum,
+                source_digest,
                 column_count: u64::try_from(legacy.columns.len()).map_err(|_| {
                     CompactError::InvalidInput("metadata column count is too large")
                 })?,
@@ -107,6 +139,7 @@ pub fn plan(source: &[u8], assignments: &MigrationAssignments) -> Result<Migrati
                 action: MigrationAction::None,
                 source_len,
                 source_checksum,
+                source_digest,
                 column_count: u64::try_from(revision.columns.len()).map_err(|_| {
                     CompactError::InvalidInput("metadata column count is too large")
                 })?,
@@ -121,7 +154,7 @@ pub fn plan(source: &[u8], assignments: &MigrationAssignments) -> Result<Migrati
 pub fn execute(source: &[u8], plan: &MigrationPlan) -> Result<Vec<u8>> {
     let source_len = u64::try_from(source.len())
         .map_err(|_| CompactError::InvalidInput("metadata source is too large"))?;
-    if source_len != plan.source_len || checksum32(source) != plan.source_checksum {
+    if source_len != plan.source_len || blake3::hash(source).as_bytes() != &plan.source_digest {
         return Err(CompactError::InvalidInput(
             "metadata source does not match migration plan",
         ));

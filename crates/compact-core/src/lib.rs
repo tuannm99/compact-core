@@ -6,6 +6,7 @@ pub mod codecs;
 pub mod format;
 pub mod framing;
 pub mod io;
+mod limits;
 pub mod parallel;
 pub mod pipeline;
 pub mod primitives;

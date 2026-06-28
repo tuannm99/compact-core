@@ -23,6 +23,7 @@ import "C"
 
 import (
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -32,9 +33,14 @@ const (
 	statusUnimplemented = 2
 	statusIO            = 3
 	statusInvalidInput  = 4
+	statusPanic         = 5
+	maxCGoBytes         = uint64(1<<31 - 1)
 )
 
 func EncodeFile(inputPath, schemaPath, outputPath string) error {
+	if err := validatePaths(inputPath, schemaPath, outputPath); err != nil {
+		return err
+	}
 	input := C.CString(inputPath)
 	schema := C.CString(schemaPath)
 	output := C.CString(outputPath)
@@ -46,6 +52,9 @@ func EncodeFile(inputPath, schemaPath, outputPath string) error {
 }
 
 func DecodeFile(inputPath, schemaPath, outputPath string) error {
+	if err := validatePaths(inputPath, schemaPath, outputPath); err != nil {
+		return err
+	}
 	input := C.CString(inputPath)
 	schema := C.CString(schemaPath)
 	output := C.CString(outputPath)
@@ -84,6 +93,8 @@ func statusToError(status int) error {
 		return fmt.Errorf("compact: i/o error")
 	case statusInvalidInput:
 		return fmt.Errorf("compact: invalid input")
+	case statusPanic:
+		return fmt.Errorf("compact: internal panic")
 	default:
 		return fmt.Errorf("compact: unknown status %d", status)
 	}
@@ -102,5 +113,24 @@ func withBytes(input []byte, call func(*C.uchar, C.size_t, *C.CompactBuffer) C.i
 	}
 	defer C.compact_buffer_free(&output)
 
-	return C.GoBytes(unsafe.Pointer(output.ptr), C.int(output.len)), nil
+	return copyOutput(unsafe.Pointer(output.ptr), uint64(output.len))
+}
+
+func validatePaths(paths ...string) error {
+	for _, path := range paths {
+		if strings.IndexByte(path, 0) >= 0 {
+			return fmt.Errorf("compact: path contains NUL byte")
+		}
+	}
+	return nil
+}
+
+func copyOutput(ptr unsafe.Pointer, length uint64) ([]byte, error) {
+	if length > maxCGoBytes {
+		return nil, fmt.Errorf("compact: output exceeds C.GoBytes length limit")
+	}
+	if length != 0 && ptr == nil {
+		return nil, fmt.Errorf("compact: output pointer is null")
+	}
+	return C.GoBytes(ptr, C.int(length)), nil
 }

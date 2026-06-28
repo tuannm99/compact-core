@@ -5,6 +5,7 @@
 //! can seek into the docID stream from a skip entry without decoding unrelated
 //! documents first.
 
+use crate::limits::MAX_COLLECTION_ENTRIES;
 use crate::{CompactError, Result, checksum32, primitives::varint};
 
 const MAGIC: [u8; 4] = *b"PST1";
@@ -266,10 +267,17 @@ impl<'a> ParsedPostingList<'a> {
     }
 
     fn decode_all(&self) -> Result<Vec<Posting>> {
-        let mut postings = Vec::with_capacity(
-            usize::try_from(self.index.doc_count)
-                .map_err(|_| CompactError::InvalidInput("posting count is too large"))?,
-        );
+        let count = usize::try_from(self.index.doc_count)
+            .map_err(|_| CompactError::InvalidInput("posting count is too large"))?;
+        if count > MAX_COLLECTION_ENTRIES
+            || count > self.doc_ids.len()
+            || count > self.frequencies.len()
+        {
+            return Err(CompactError::InvalidInput(
+                "posting count exceeds section bounds",
+            ));
+        }
+        let mut postings = Vec::with_capacity(count);
         let mut doc_cursor = 0usize;
         let mut freq_cursor = 0usize;
         let mut pos_cursor = 0usize;
@@ -356,6 +364,11 @@ fn encode_position_deltas(positions: &[u64]) -> Vec<u8> {
 fn read_positions(data: &[u8], cursor: &mut usize, count: u64) -> Result<Vec<u64>> {
     let capacity = usize::try_from(count)
         .map_err(|_| CompactError::InvalidInput("posting frequency is too large"))?;
+    if capacity > MAX_COLLECTION_ENTRIES || capacity > data.len().saturating_sub(*cursor) {
+        return Err(CompactError::InvalidInput(
+            "posting frequency exceeds positions section bounds",
+        ));
+    }
     let mut positions = Vec::with_capacity(capacity);
     let mut previous = 0u64;
 
@@ -468,7 +481,9 @@ fn take_section<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{Posting, decode_postings, encode_postings, inspect_postings, seek_doc};
+    use super::{
+        Posting, decode_postings, encode_postings, inspect_postings, read_positions, seek_doc,
+    };
     use crate::CompactError;
 
     fn sample_postings() -> Vec<Posting> {
@@ -610,6 +625,16 @@ mod tests {
         assert!(matches!(
             err,
             CompactError::InvalidInput("posting checksum mismatch")
+        ));
+    }
+
+    #[test]
+    fn position_decoder_rejects_frequency_beyond_section_bytes() {
+        let mut cursor = 0;
+
+        assert!(matches!(
+            read_positions(&[], &mut cursor, 1).unwrap_err(),
+            CompactError::InvalidInput(_)
         ));
     }
 }

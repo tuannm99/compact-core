@@ -1,4 +1,5 @@
 use crate::CompactError;
+use crate::limits::MAX_DECODED_BYTES;
 
 /// Encode bytes with run-length encoding.
 ///
@@ -37,6 +38,14 @@ pub fn encode_rle(data: &[u8]) -> Vec<u8> {
 /// - odd-length input cannot be split into complete pairs
 /// - count zero is invalid because the encoder never emits empty runs
 pub fn decode_rle(data: &[u8]) -> Result<Vec<u8>, CompactError> {
+    decode_rle_bounded(data, MAX_DECODED_BYTES)
+}
+
+/// Decode RLE pairs while rejecting output larger than `max_output_len`.
+///
+/// Callers that have a tighter size from enclosing metadata should use this
+/// function instead of relying on the crate-wide defensive limit.
+pub fn decode_rle_bounded(data: &[u8], max_output_len: usize) -> Result<Vec<u8>, CompactError> {
     if !data.len().is_multiple_of(2) {
         return Err(CompactError::InvalidInput(
             "RLE data must have even length (count, value) pairs",
@@ -55,6 +64,11 @@ pub fn decode_rle(data: &[u8]) -> Result<Vec<u8>, CompactError> {
         estimated_size = estimated_size
             .checked_add(count)
             .ok_or(CompactError::InvalidInput("RLE decoded length overflow"))?;
+        if estimated_size > max_output_len {
+            return Err(CompactError::InvalidInput(
+                "RLE decoded length exceeds configured limit",
+            ));
+        }
     }
 
     let mut result = Vec::with_capacity(estimated_size);
@@ -72,7 +86,7 @@ pub fn decode_rle(data: &[u8]) -> Result<Vec<u8>, CompactError> {
 #[cfg(test)]
 mod tests {
     use crate::CompactError;
-    use crate::primitives::rle::{decode_rle, encode_rle};
+    use crate::primitives::rle::{decode_rle, decode_rle_bounded, encode_rle};
 
     #[test]
     fn encode_rle_empty() {
@@ -129,6 +143,13 @@ mod tests {
     #[test]
     fn decode_rle_rejects_zero_count() {
         let err = decode_rle(&[0, b'A']).unwrap_err();
+
+        assert!(matches!(err, CompactError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn decode_rle_rejects_output_above_caller_limit() {
+        let err = decode_rle_bounded(&[5, b'A'], 4).unwrap_err();
 
         assert!(matches!(err, CompactError::InvalidInput(_)));
     }

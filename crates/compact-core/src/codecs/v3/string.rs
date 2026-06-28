@@ -6,6 +6,7 @@ use serde_json::{Map, Value};
 
 use super::EncodedColumnChunk;
 use crate::format::v3::ColumnChunkMetadata;
+use crate::limits::{MAX_DECODED_BYTES, MAX_DECODED_VALUES};
 use crate::primitives::{bitmap, rle, varint};
 use crate::schema::{ColumnSchema, SchemaCodec, SchemaValueType};
 use crate::{CompactError, Result};
@@ -71,6 +72,11 @@ pub fn decode_string_column(
     validate_metadata(metadata, payload)?;
     let value_count = usize::try_from(metadata.value_count)
         .map_err(|_| CompactError::InvalidInput("cmp3 string value count is too large"))?;
+    if value_count > MAX_DECODED_VALUES {
+        return Err(CompactError::InvalidInput(
+            "cmp3 string value count exceeds configured limit",
+        ));
+    }
     let non_null_count = usize::try_from(metadata.value_count - metadata.null_count)
         .map_err(|_| CompactError::InvalidInput("cmp3 string value count is too large"))?;
     let validity_len = if metadata.nullable {
@@ -84,6 +90,11 @@ pub fn decode_string_column(
         ));
     }
     let (validity_payload, values_payload) = payload.split_at(validity_len);
+    if metadata.codec != SchemaCodec::Rle && non_null_count > values_payload.len() {
+        return Err(CompactError::InvalidInput(
+            "cmp3 string payload cannot contain declared values",
+        ));
+    }
     let validity = if metadata.nullable {
         bitmap::decode(validity_payload, value_count)?
     } else {
@@ -97,7 +108,21 @@ pub fn decode_string_column(
     let values = match metadata.codec {
         SchemaCodec::Prefix => decode_prefix(values_payload, non_null_count)?,
         SchemaCodec::Dictionary => decode_dictionary(values_payload, non_null_count)?,
-        SchemaCodec::Rle => decode_stored(&rle::decode_rle(values_payload)?, non_null_count)?,
+        SchemaCodec::Rle => {
+            let raw_size = usize::try_from(metadata.raw_size)
+                .map_err(|_| CompactError::InvalidInput("cmp3 string raw size is too large"))?;
+            let prefix_bytes = non_null_count
+                .checked_mul(10)
+                .ok_or(CompactError::InvalidInput("cmp3 string size overflow"))?;
+            let max_encoded_values = raw_size
+                .checked_add(prefix_bytes)
+                .ok_or(CompactError::InvalidInput("cmp3 string size overflow"))?
+                .min(MAX_DECODED_BYTES);
+            decode_stored(
+                &rle::decode_rle_bounded(values_payload, max_encoded_values)?,
+                non_null_count,
+            )?
+        }
         SchemaCodec::Stored => decode_stored(values_payload, non_null_count)?,
         _ => {
             return Err(CompactError::InvalidInput(
@@ -379,6 +404,7 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{decode_string_column, encode_string_column};
+    use crate::limits::MAX_DECODED_VALUES;
     use crate::schema::{ColumnSchema, SchemaCodec, SchemaValueType};
 
     fn column(codec: SchemaCodec, nullable: bool) -> ColumnSchema {
@@ -444,5 +470,18 @@ mod tests {
         let prefix = encode_string_column(&column(SchemaCodec::Prefix, false), &input).unwrap();
         let stored = encode_string_column(&column(SchemaCodec::Stored, false), &input).unwrap();
         assert!(prefix.payload.len() < stored.payload.len());
+    }
+
+    #[test]
+    fn decoder_rejects_excessive_required_value_count_before_allocating() {
+        let mut encoded =
+            encode_string_column(&column(SchemaCodec::Stored, false), &rows(&[json!("a")]))
+                .unwrap();
+        encoded.metadata.value_count = (MAX_DECODED_VALUES as u64) + 1;
+        encoded.metadata.codec_metadata = encoded.metadata.value_count.to_le_bytes().to_vec();
+
+        let error = decode_string_column(&encoded.metadata, &encoded.payload).unwrap_err();
+
+        assert!(matches!(error, crate::CompactError::InvalidInput(_)));
     }
 }

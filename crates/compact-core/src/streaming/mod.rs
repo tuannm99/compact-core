@@ -11,8 +11,8 @@
 
 use std::io::{BufRead, Read, Write};
 
-use crate::Result;
 use crate::schema::Schema;
+use crate::{CompactError, Result};
 
 pub mod append;
 pub mod metadata;
@@ -51,16 +51,11 @@ pub fn encode_jsonl_stream<R: BufRead, W: Write>(
     schema: Schema,
     options: BlockOptions,
 ) -> Result<W> {
+    let options = options.validate()?;
+    let max_line_len = options.max_uncompressed_bytes_per_block;
     let mut writer = JsonlBlockWriter::new(output, schema, options)?;
-    let mut line = String::new();
 
-    loop {
-        line.clear();
-        let read = input.read_line(&mut line)?;
-        if read == 0 {
-            break;
-        }
-
+    while let Some(line) = read_bounded_jsonl_line(&mut input, max_line_len)? {
         writer.write_jsonl_line(&line)?;
     }
 
@@ -84,6 +79,49 @@ pub fn decode_jsonl_stream<R: Read, W: Write>(
     }
 
     Ok(output)
+}
+
+/// Read one UTF-8 line without allowing an unterminated row to grow without
+/// bound. One extra byte is accepted so CRLF and a missing final newline can
+/// reach the writer's normalization check.
+pub(crate) fn read_bounded_jsonl_line<R: BufRead>(
+    input: &mut R,
+    max_line_len: usize,
+) -> Result<Option<String>> {
+    let allocation_limit = max_line_len
+        .checked_add(1)
+        .ok_or(CompactError::InvalidInput("jsonl row limit is too large"))?;
+    let mut bytes = Vec::new();
+
+    loop {
+        let available = input.fill_buf()?;
+        if available.is_empty() {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            break;
+        }
+
+        let consumed = available
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if bytes.len().saturating_add(consumed) > allocation_limit {
+            return Err(CompactError::InvalidInput(
+                "jsonl row exceeds max uncompressed bytes per block",
+            ));
+        }
+        bytes.extend_from_slice(&available[..consumed]);
+        input.consume(consumed);
+
+        if bytes.last() == Some(&b'\n') {
+            break;
+        }
+    }
+
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| CompactError::InvalidInput("jsonl row must be utf-8"))
 }
 
 /// Inspect a v0.2 JSONL block stream without requiring a schema.
@@ -161,6 +199,22 @@ columns:
         let decoded = decode_jsonl_stream(Cursor::new(encoded), Vec::new(), schema()).unwrap();
 
         assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn stream_encoder_rejects_oversized_unterminated_row() {
+        let error = encode_jsonl_stream(
+            Cursor::new("123456"),
+            Vec::new(),
+            schema(),
+            BlockOptions {
+                max_rows_per_block: 1,
+                max_uncompressed_bytes_per_block: 4,
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, crate::CompactError::InvalidInput(_)));
     }
 
     #[test]
