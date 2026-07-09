@@ -13,6 +13,7 @@ stable contracts first, automation second, new features last
 1. [Scope and decisions](01-scope-and-decisions.md)
 2. [Stabilization audit](02-stabilization-audit.md)
 3. [Implementation plan](03-implementation-plan.md)
+4. [Phase 1 audit report](04-phase1-audit-report.md)
 
 The first task after v0.9.1 is the stabilization audit. That audit decides which
 APIs, formats, CLI commands, and binding behaviors are stable enough to support
