@@ -18,3 +18,6 @@ stable contracts first, automation second, new features last
 The first task after v0.9.1 is the stabilization audit. That audit decides which
 APIs, formats, CLI commands, and binding behaviors are stable enough to support
 after v1.0.
+
+The public format stabilization draft lives in
+[`../../../format-spec.md`](../../../format-spec.md).

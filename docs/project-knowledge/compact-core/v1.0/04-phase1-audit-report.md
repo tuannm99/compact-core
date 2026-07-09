@@ -22,12 +22,11 @@ before they are specified.
 
 These must be resolved before tagging v1.0.0.
 
-- Cargo package version is still `0.9.0` while the latest release tag is
-  `v0.9.1`. The release process must keep crate metadata, CLI `--version`, FFI
-  `compact_version`, docs, and tags aligned.
-- CMP1-CMP4 do not yet have one complete public format specification that
-  documents byte layout, limits, checksums, compatibility behavior, and recovery
-  behavior.
+- Release metadata must stay aligned across Cargo, CLI `--version`, FFI
+  `compact_version`, docs, and tags. This was found during the audit when
+  `v0.9.1` existed but Cargo metadata still reported `0.9.0`.
+- CMP1-CMP4 now have a stabilization draft in `docs/format-spec.md`, but it
+  still needs review against tests before it can be called final.
 - Public Rust module surface is broader than the likely stable API. Modules
   such as low-level `format`, `codecs`, `pipeline`, `statistics`, and selected
   primitives need explicit stable/internal/experimental classification.
@@ -174,12 +173,11 @@ Spec gaps to close:
 
 ## Immediate Next Work
 
-1. Sync Cargo package version with the latest release line or document why the
-   tag is patch-only without a crate version bump.
-2. Write `docs/format-spec.md` covering CMP1-CMP4.
-3. Write `docs/api-stability.md` classifying Rust, FFI, SDK, and CLI surfaces.
-4. Add a CI/release checklist document that maps directly to the v1.0 DoD.
-5. Add coverage and fuzz gates to CI.
+1. Review `docs/format-spec.md` against implementation tests and fill any
+   codec-specific payload details needed by external implementers.
+2. Write `docs/api-stability.md` classifying Rust, FFI, SDK, and CLI surfaces.
+3. Add a CI/release checklist document that maps directly to the v1.0 DoD.
+4. Add coverage and fuzz gates to CI.
 
 ## Local Quality Gate
 
@@ -199,5 +197,6 @@ Result:
 - All commands passed.
 - Workspace tests passed in debug and release mode.
 - Cross-language smoke passed for Go, Python, and Node.
-- Build output still identifies crates as `v0.9.0`, confirming the release
-  metadata blocker above.
+- Build output identified crates as `v0.9.0`, confirming the release metadata
+  blocker above at audit time. Follow-up work updated workspace and binding
+  metadata to `0.9.1`.
